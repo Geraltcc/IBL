@@ -1,28 +1,24 @@
-#include "grid/quadtree.h"
+#include "grid/octree.h"
 #include "embed.h"
-#include "distance.h"
 #include "mycompressible_nofr.h"
 #include "view.h"
 #include "cmap.h"
 #include "ibl.h"
 
 
-#define maxlevel 10
-#define minlevel 6
+#define maxlevel 6
+#define minlevel 4
 
 #define mach 0.6
 #define rho0 1.
 #define p0 1.
 
-scalar d[];
-coord* p = NULL;
-
 int main() {
-    L0 = 5.0;
+    L0 = 1.0;
     size(L0);
 
     init_grid(1 << minlevel);
-    origin(-L0/2., -L0/2.);
+    origin(-L0/2., -L0/2., -L0/2.);
 
     run();
 }
@@ -31,29 +27,28 @@ rho[left] = dirichlet(rho0);
 E[left] = dirichlet(p0/(gammao - 1.) + 0.5*rho0*sq(mach));
 w.x[left] = dirichlet(mach*rho0);
 w.y[left] = dirichlet(0.);
+w.z[left] = dirichlet(0.);
 
 // 流出边界
 rho[right] = neumann(0.);
 E[right] = neumann(0.);
 w.x[right] = neumann(0.);
 w.y[right] = neumann(0.);
+w.z[right] = neumann(0.);
 
 // 固体边界 - 滑移壁（无穿透）
-rho[embed] = neumann(0.);
-E[embed] = neumann(0.);
-w.n[embed] = dirichlet(0.);  // 无穿透
-w.t[embed] = neumann(0.);    // 滑移
+// rho[embed] = neumann(0.);
+// E[embed] = neumann(0.);
+// w.n[embed] = dirichlet(0.);  // 无穿透
+// w.t[embed] = neumann(0.);    // 滑移
 
 scalar ue[];
+scalar w_grad_scalar[];
 
 event solid_init(i = 0) {
-    FILE* fp = fopen("NACA0012_processed.gnu", "r");
-    p = input_xy(fp);
-    distance(d, p);
-    while(adapt_wavelet({d}, (double[]){1e-30}, maxlevel).nf);
 
     do {
-        solid(cs, fs, (d[]+d[-1]+d[0,-1]+d[-1,-1])/4.);
+        solid(cs, fs, sq(x) + sq(y) + sq(z) - sq(0.25));
     } while (adapt_wavelet({cs}, (double[]){1e-30}, maxlevel).nf);
 }
 
@@ -63,18 +58,20 @@ event init(i = 0) {
             rho[] = rho0;
             w.x[] = mach * rho0;
             w.y[] = 0.;
+            w.z[] = 0.;
             E[] = p0/(gammao - 1.) + 0.5*rho0*sq(mach);
         } else {
             rho[] = 0.;
             w.x[] = 0.;
             w.y[] = 0.;
+            w.z[] = 0.;
             E[] = 0.;
         }
     }
 }
 
 event adapt(i++) {
-    adapt_wavelet({cs, rho, w}, (double[]){1e-30, 1e-2, 1e-2, 1e-2, 1e-2}, maxlevel, minlevel);
+    adapt_wavelet({cs, rho, w}, (double[]){1e-30, 5e-2, 5e-2, 5e-2, 5e-2, 5e-2}, maxlevel, minlevel);
 }
 
 double w_max = 0.;
@@ -103,6 +100,16 @@ double scalar_min(scalar s) {
     return min;
 }
 
+double scalar_abs_max(scalar s) {
+    double max = 0.;
+    foreach(reduction(max:max)) {
+        if (max < fabs(s[])) {
+            max = fabs(s[]);
+        }
+    }
+    return max;
+}
+
 event logfile(i++) {
     w_max = scalar_max(w.x);
     cs_min = HUGE;
@@ -127,10 +134,10 @@ event output(t += 1.0) {
     char filename[80];
 
     sprintf(filename, "output/grid_%04d.png", frame);
-    view(width = 2000, height = 2000, samples=8);
+    view(width = 2000, height = 2000);
     clear();
-    squares("w.x", map=viridis, min=w_min, max=w_max, linear=false);
-    draw_vof("cs", "fs", lc={0., 0., 0.}, lw=1.0);
+    // squares("w.x", map=viridis, min=w_min, max=w_max, linear=false);
+    draw_vof("cs", "fs", color = "w.x");
     colorbar(map=viridis, min=w_min, max=w_max, label="w.x", pos={-0.95, 0.});
     save(filename);
     frame++;
@@ -143,6 +150,7 @@ event test(t = 1.0) {
         foreach_dimension()
             w_grad.x[] = 0.;
         ue[] = 0.;
+        w_grad_scalar[] = 0.;
     }
 
     build_cutcell_cache();
@@ -150,27 +158,33 @@ event test(t = 1.0) {
         coord n, b;
 
         embed_geometry(point, &b, &n);
-        double wx = embed_interpolate(point, w.x, b);
-        double wy = embed_interpolate(point, w.y, b);
-        double rho_s = embed_interpolate(point, rho, b);
-        double ux = wx/rho_s, uy = wy/rho_s;
-        double un = ux*n.x + uy*n.y;
+        double wx = my_embed_interpolate(point, w.x, b);
+        double wy = my_embed_interpolate(point, w.y, b);
+        double wz = my_embed_interpolate(point, w.z, b);
+        double rho_s = my_embed_interpolate(point, rho, b);
+        double ux = wx/rho_s, uy = wy/rho_s, uz = wz/rho_s;
+        double un = ux*n.x + uy*n.y + uz*n.z;
 
-        ue[] = sqrt(sq(ux - un * n.x) + sq(uy - un * n.y));
+        ue[] = sqrt(sq(ux - un * n.x) + sq(uy - un * n.y) + sq(uz - un * n.z));
     }
-    cutcell_tangential_gradient(ue, w_grad);
+    // cutcell_tangential_gradient(ue, w_grad);
+    cutcell_tangential_gradient_extend(ue, w_grad);
 
-    view();
+    foreach_cache(cutcells) {
+        coord n, b;
+        embed_geometry(point, &b, &n);
+        foreach_dimension() {
+            w_grad_scalar[] += sq(w_grad.x[]);
+        }
+        w_grad_scalar[] = sqrt(w_grad_scalar[]);
+    }
+
+    view(width = 2000, height = 2000);
     clear();
-    squares("w_grad.x", map=blue_white_red, min = -scalar_max(w_grad.x), max = scalar_max(w_grad.x), linear = false);
+    draw_vof("cs", "fs", color = "w_grad.x", map = blue_white_red, min = -scalar_max(w_grad.x), max = scalar_max(w_grad.x), linear = false);
+    // squares("w_grad.x", map=blue_white_red, min = -scalar_max(w_grad.x), max = scalar_max(w_grad.x), linear = false);
     colorbar(map = blue_white_red, min = -scalar_max(w_grad.x), max = scalar_max(w_grad.x));
-    save("output/w_grad.png");
+    save("output/w_grad_scalar.png");
 }
 
-event end(t = 5.0) {
-    if (p) {
-        free (p);
-    }
-
-    d.delete = NULL;
-}
+event end(t = 5.0);

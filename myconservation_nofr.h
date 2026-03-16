@@ -22,6 +22,43 @@ case of this generic algorithm.
 
 The user must provide the lists of conserved scalar and vector fields
 */
+double my_embed_interpolate (Point point, scalar s, coord b)
+{
+  int i = sign(b.x), j = sign(b.y);
+#if dimension == 2
+  if (cs[i] && cs[0,j] && cs[i,j])
+    // bilinear interpolation when all neighbors are defined
+    return ((s[]*(1. - fabs(b.x)) + s[i]*fabs(b.x))*(1. - fabs(b.y)) + 
+	    (s[0,j]*(1. - fabs(b.x)) + s[i,j]*fabs(b.x))*fabs(b.y));
+#else // dimension == 3
+  int k = sign(b.z);
+  if (cs[i,0,0] && cs[0,j,0] && cs[i,j,0] &&
+      cs[0,0,k] && cs[i,0,k] && cs[0,j,k] && cs[i,j,k] ) {
+    double val_0, val_k;
+    // bilinear interpolation in x-y-planes when all neighbors are defined
+    val_0 = (s[0,0,0]*(1. - fabs(b.x)) + s[i,0,0]*fabs(b.x))*(1. - fabs(b.y)) +
+      (s[0,j,0]*(1. - fabs(b.x)) + s[i,j,0]*fabs(b.x))*fabs(b.y);
+    val_k = (s[0,0,k]*(1. - fabs(b.x)) + s[i,0,k]*fabs(b.x))*(1. - fabs(b.y)) +
+      (s[0,j,k]*(1. - fabs(b.x)) + s[i,j,k]*fabs(b.x))*fabs(b.y);
+    // trilinear interpolation when all neighbors are defined
+    return (val_0*(1. - fabs(b.z)) + val_k*fabs(b.z));
+  }
+#endif 
+  else {
+    // linear interpolation with gradients biased toward the
+    // cells which are defined
+    double val = s[];
+    foreach_dimension() {
+      int i = sign(b.x);
+      if (cs[i] && cs[])
+	val += fabs(b.x)*(s[i] - s[]);
+      else if (cs[-i] && cs[] )
+	val += fabs(b.x)*(s[] - s[-i]);
+    }
+    return val;
+  }
+}
+
 
 #define CS_FLOOR 0.1
 
@@ -255,16 +292,16 @@ double update_conservation (scalar * conserved, scalar * updates, double dtmax)
       coord n, b;
       double area = embed_geometry(point, &b, &n);
       
-      double rho_b = embed_interpolate(point, rho, b);
-      double E_b   = embed_interpolate(point, E, b);
-      double wx_b  = embed_interpolate(point, w.x, b);
+      double rho_b = my_embed_interpolate(point, rho, b);
+      double E_b   = my_embed_interpolate(point, E, b);
+      double wx_b  = my_embed_interpolate(point, w.x, b);
       double w2_b  = sq(wx_b);
     #if dimension > 1
-      double wy_b  = embed_interpolate(point, w.y, b);
+      double wy_b  = my_embed_interpolate(point, w.y, b);
       w2_b += sq(wy_b);
     #endif
     #if dimension > 2
-      double wz_b  = embed_interpolate(point, w.z, b);
+      double wz_b  = my_embed_interpolate(point, w.z, b);
       w2_b += sq(wz_b);
     #endif
       
