@@ -37,25 +37,23 @@ void build_cutcell_cache() {
     }
 }
 
-
-const double ibl_dt = 1e-5;
-scalar ibl_theta[];
-
 #include "tangential_gradients.h"
 
-event init(i = 0) {
-    ibl_theta.refine = ibl_theta.prolongation = refine_embed_linear;
-    ibl_theta.restriction = restriction_volume_average;
-    ibl_theta.dirty = true;
 
-    foreach() {
-        if (is_cutcell)
-            ibl_theta[] = 1e-10;
-        else
-            ibl_theta[] = 0.;
-    }
-}
+// event init(i = 0) {
+//     ibl_theta.refine = ibl_theta.prolongation = refine_embed_linear;
+//     ibl_theta.restriction = restriction_volume_average;
+//     ibl_theta.dirty = true;
 
+//     foreach() {
+//         if (is_cutcell)
+//             ibl_theta[] = 1e-10;
+//         else
+//             ibl_theta[] = 0.;
+//     }
+// }
+
+/*
 #if dimension == 2
 event update(i++) {
     // H* (Eq. 10)
@@ -78,3 +76,4 @@ event update(i++) {
     double Cd = H_star * Re_Cd / (2. * Re_theta);
 }
 #endif
+*/

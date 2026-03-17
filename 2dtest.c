@@ -17,6 +17,8 @@
 scalar d[];
 coord* p = NULL;
 
+scalar * my_dumplist = {rho, w.x, w.y, E, cs};
+
 int main() {
     L0 = 5.0;
     size(L0);
@@ -103,7 +105,14 @@ double scalar_min(scalar s) {
     return min;
 }
 
+scalar wn[];
+
 event logfile(i++) {
+    double dw = 0.;
+    if (dt > 1e-10)
+        dw = change (w.x, wn)/dt;
+    else
+        dw = 0.;
     w_max = scalar_max(w.x);
     cs_min = HUGE;
     foreach(reduction(min:cs_min)) {
@@ -111,61 +120,61 @@ event logfile(i++) {
             cs_min = cs[];
         }
     }
-    fprintf(stderr, "i: %04d t: %.4e dt: %.4e grid: %ld w_max: %.4e cs_min: %.4e\n", i, t, dt, grid->n, w_max, cs_min);
+    fprintf(stderr, "i: %04d t: %.4e dt: %.4e grid: %ld w_max: %.4e cs_min: %.4e dw: %.4e\n", i, t, dt, grid->n, w_max, cs_min, dw);
 }
 
 
 
 
-event output(t += 1.0) {
-    static int frame = 0;
-    w_max = scalar_max(w.x);
-    w_min = scalar_min(w.x);
+// event output(t += 1.0) {
+//     static int frame = 0;
+//     w_max = scalar_max(w.x);
+//     w_min = scalar_min(w.x);
 
-    w_min = fmax(0., w_min);
+//     w_min = fmax(0., w_min);
 
-    char filename[80];
+//     char filename[80];
 
-    sprintf(filename, "output/grid_%04d.png", frame);
-    view(width = 2000, height = 2000, samples=8);
-    clear();
-    squares("w.x", map=viridis, min=w_min, max=w_max, linear=false);
-    draw_vof("cs", "fs", lc={0., 0., 0.}, lw=1.0);
-    colorbar(map=viridis, min=w_min, max=w_max, label="w.x", pos={-0.95, 0.});
-    save(filename);
-    frame++;
-}
+//     sprintf(filename, "output/grid_%04d.png", frame);
+//     view(width = 2000, height = 2000, samples=8);
+//     clear();
+//     squares("w.x", map=viridis, min=w_min, max=w_max, linear=false);
+//     draw_vof("cs", "fs", lc={0., 0., 0.}, lw=1.0);
+//     colorbar(map=viridis, min=w_min, max=w_max, label="w.x", pos={-0.95, 0.});
+//     save(filename);
+//     frame++;
+// }
 
-event test(t = 1.0) {
+// event test(t = 1.0) {
 
-    vector w_grad[];
-    foreach() {
-        foreach_dimension()
-            w_grad.x[] = 0.;
-        ue[] = 0.;
-    }
+//     vector w_grad[];
+//     foreach() {
+//         foreach_dimension()
+//             w_grad.x[] = 0.;
+//         ue[] = 0.;
+//     }
 
-    build_cutcell_cache();
-    foreach_cache(cutcells) {
-        coord n, b;
+//     build_cutcell_cache();
+//     foreach_cache(cutcells) {
+//         coord n, b;
 
-        embed_geometry(point, &b, &n);
-        double wx = embed_interpolate(point, w.x, b);
-        double wy = embed_interpolate(point, w.y, b);
-        double rho_s = embed_interpolate(point, rho, b);
-        double ux = wx/rho_s, uy = wy/rho_s;
-        double un = ux*n.x + uy*n.y;
+//         embed_geometry(point, &b, &n);
+//         double wx = embed_interpolate(point, w.x, b);
+//         double wy = embed_interpolate(point, w.y, b);
+//         double rho_s = embed_interpolate(point, rho, b);
+//         double ux = wx/rho_s, uy = wy/rho_s;
+//         double un = ux*n.x + uy*n.y;
 
-        ue[] = sqrt(sq(ux - un * n.x) + sq(uy - un * n.y));
-    }
-    cutcell_tangential_gradient_lsq_backward(ue, w_grad);
+//         ue[] = sqrt(sq(ux - un * n.x) + sq(uy - un * n.y));
+//     }
+//     cutcell_tangential_gradient_lsq_backward(ue, w_grad);
 
-    view();
-    clear();
-    squares("w_grad.x", map=blue_white_red, min = -scalar_max(w_grad.x), max = scalar_max(w_grad.x), linear = false);
-    colorbar(map = blue_white_red, min = -scalar_max(w_grad.x), max = scalar_max(w_grad.x));
-    save("output/w_grad.png");
-}
+//     view();
+//     clear();
+//     squares("w_grad.x", map=blue_white_red, min = -scalar_max(w_grad.x), max = scalar_max(w_grad.x), linear = false);
+//     colorbar(map = blue_white_red, min = -scalar_max(w_grad.x), max = scalar_max(w_grad.x));
+//     save("output/w_grad.png");
+// }
 
 event end(t = 5.0) {
     if (p) {
@@ -173,4 +182,6 @@ event end(t = 5.0) {
     }
 
     d.delete = NULL;
+
+    dump("restart", my_dumplist);
 }
