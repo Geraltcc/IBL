@@ -56,7 +56,7 @@ event init(i = 0) {
     }
 }
 
-/*
+#if dimension == 2
 event update(i++) {
     // H* (Eq. 10)
     double H_star = (Hk < 4.) ?
@@ -77,4 +77,4 @@ event update(i++) {
 
     double Cd = H_star * Re_Cd / (2. * Re_theta);
 }
-*/
+#endif

@@ -39,10 +39,10 @@ w.x[right] = neumann(0.);
 w.y[right] = neumann(0.);
 
 // 固体边界 - 滑移壁（无穿透）
-rho[embed] = neumann(0.);
-E[embed] = neumann(0.);
-w.n[embed] = dirichlet(0.);  // 无穿透
-w.t[embed] = neumann(0.);    // 滑移
+// rho[embed] = neumann(0.);
+// E[embed] = neumann(0.);
+// w.n[embed] = dirichlet(0.);  // 无穿透
+// w.t[embed] = neumann(0.);    // 滑移
 
 scalar ue[];
 
@@ -158,7 +158,7 @@ event test(t = 1.0) {
 
         ue[] = sqrt(sq(ux - un * n.x) + sq(uy - un * n.y));
     }
-    cutcell_tangential_gradient(ue, w_grad);
+    cutcell_tangential_gradient_lsq_backward(ue, w_grad);
 
     view();
     clear();

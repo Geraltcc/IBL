@@ -209,7 +209,11 @@ void cutcell_tangential_gradient_lsq_backward(scalar f, vector g) {
         embed_geometry(point, &bary, &n_emb);
 
         // ---- 构造切平面正交基 t1, t2 ----
-        coord t1, t2;
+        coord t1;
+    #if dimension > 2
+        coord t2;
+    #endif
+    
 #if dimension == 2
         t1 = (coord){-n_emb.y, n_emb.x};
 #elif dimension == 3
@@ -239,9 +243,14 @@ void cutcell_tangential_gradient_lsq_backward(scalar f, vector g) {
 #endif
 
         // ---- 2×2 正规方程 (2D 中退化为 1×1) ----
-        double m11 = 0., m12 = 0., m22 = 0.;
-        double rhs1 = 0., rhs2 = 0.;
+        double m11 = 0.;
+        double rhs1 = 0.;
         int nn = 0;
+
+    #if dimension > 2
+        double m12 = 0., m22 = 0.;
+        double rhs2 = 0.;
+    #endif
 
         foreach_neighbor(1) {
             if (is_cutcell) {
@@ -260,20 +269,27 @@ void cutcell_tangential_gradient_lsq_backward(scalar f, vector g) {
 
                 // 投影到切平面基向量
                 double s1 = dx*t1.x + dy*t1.y;
-                double s2 = dx*t2.x + dy*t2.y;
+
     #if dimension > 2
                 s1 += dz*t1.z;
-                s2 += dz*t2.z;
-    #endif
 
-                m11 += w*s1*s1;  m12 += w*s1*s2;  m22 += w*s2*s2;
-                rhs1 += w*df*s1;  rhs2 += w*df*s2;
+                double s2 = dx*t2.x + dy*t2.y;
+                s2 += dz*t2.z;
+
+                m12 += w*s1*s2;  m22 += w*s2*s2;
+                rhs2 += w*df*s2;
+    #endif
+                m11 += w*s1*s1;  
+                rhs1 += w*df*s1;  
                 nn++;
             }
         }
 
         // ---- 求解 ----
-        double g1 = 0., g2 = 0.;
+        double g1 = 0.;
+    #if dimension > 2
+        double g2 = 0.;
+    #endif
 
 #if dimension == 2
         if (nn >= 1 && fabs(m11) > 1e-30)
@@ -289,11 +305,13 @@ void cutcell_tangential_gradient_lsq_backward(scalar f, vector g) {
 #endif
 
         // ---- 反投影到笛卡尔坐标 ----
-        g.x[] = g1*t1.x + g2*t2.x;
+        g.x[] = g1*t1.x;
 #if dimension > 1
-        g.y[] = g1*t1.y + g2*t2.y;
+        g.y[] = g1*t1.y;
 #endif
 #if dimension > 2
+        g.x[] += g2 * t2.x;
+        g.y[] += g2 * t2.y;
         g.z[] = g1*t1.z + g2*t2.z;
 #endif
     }
