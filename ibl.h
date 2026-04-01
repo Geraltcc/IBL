@@ -4,6 +4,17 @@
 
 Cache cutcells = {0};
 
+bool is_nested(Point point) {
+    bool flag = true;
+    foreach_neighbor(1) {
+        if (is_solid) {
+            flag = false;
+            break;
+        }
+    }
+    return flag;
+}
+
 void build_cutcell_cache() {
     free(cutcells.p);
     cutcells.p = NULL;
@@ -38,42 +49,3 @@ void build_cutcell_cache() {
 }
 
 #include "tangential_gradients.h"
-
-
-// event init(i = 0) {
-//     ibl_theta.refine = ibl_theta.prolongation = refine_embed_linear;
-//     ibl_theta.restriction = restriction_volume_average;
-//     ibl_theta.dirty = true;
-
-//     foreach() {
-//         if (is_cutcell)
-//             ibl_theta[] = 1e-10;
-//         else
-//             ibl_theta[] = 0.;
-//     }
-// }
-
-/*
-#if dimension == 2
-event update(i++) {
-    // H* (Eq. 10)
-    double H_star = (Hk < 4.) ?
-        1.515 + 0.076 * sq(4. - Hk) / Hk :
-        1.515 + 0.040 * sq(Hk - 4.) / Hk;
-
-    // Cf (Eq. 11)
-    double Re_Cf2 = (Hk < 7.4) ?
-        -0.067 + 0.01977 * sq(7.4 - Hk) / (Hk - 1.) :
-        -0.067 + 0.022 * sq(1. - 1.4 / (Hk - 6.));
-
-    double Cf = 2. * Re_Cf2 / Re_theta;
-
-    // Cd (Eq. 12)
-    double Re_Cd = (Hk < 4.) ?
-        0.207 + 0.00205 * pow(4. - Hk, 5.5) :
-        0.207 - 0.003 * sq(Hk - 4.) / (1. + 0.02 * sq(Hk - 4.));
-
-    double Cd = H_star * Re_Cd / (2. * Re_theta);
-}
-#endif
-*/

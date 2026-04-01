@@ -1,0 +1,1 @@
+gnuplot plot_Cf.gp && gnuplot plot_th.gp && gnuplot plot_ue.gp

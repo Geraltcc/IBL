@@ -245,7 +245,7 @@ void cutcell_tangential_gradient_lsq_backward(scalar f, vector g) {
         // ---- 2×2 正规方程 (2D 中退化为 1×1) ----
         double m11 = 0.;
         double rhs1 = 0.;
-        int nn = 0;
+
 
     #if dimension > 2
         double m12 = 0., m22 = 0.;
@@ -253,6 +253,7 @@ void cutcell_tangential_gradient_lsq_backward(scalar f, vector g) {
     #endif
 
         foreach_neighbor(1) {
+
             if (is_cutcell) {
 
                 double dx = x - x0, dy = y - y0;
@@ -281,7 +282,6 @@ void cutcell_tangential_gradient_lsq_backward(scalar f, vector g) {
     #endif
                 m11 += w*s1*s1;  
                 rhs1 += w*df*s1;  
-                nn++;
             }
         }
 
@@ -292,16 +292,16 @@ void cutcell_tangential_gradient_lsq_backward(scalar f, vector g) {
     #endif
 
 #if dimension == 2
-        if (nn >= 1 && fabs(m11) > 1e-30)
+        if (fabs(m11) > 1e-30)
             g1 = rhs1 / m11;
 #elif dimension == 3
-        if (nn >= 2) {
-            double det = m11*m22 - m12*m12;
-            if (fabs(det) > 1e-30) {
-                g1 = ( m22*rhs1 - m12*rhs2) / det;
-                g2 = (-m12*rhs1 + m11*rhs2) / det;
-            }
+
+        double det = m11*m22 - m12*m12;
+        if (fabs(det) > 1e-30) {
+            g1 = ( m22*rhs1 - m12*rhs2) / det;
+            g2 = (-m12*rhs1 + m11*rhs2) / det;
         }
+       
 #endif
 
         // ---- 反投影到笛卡尔坐标 ----

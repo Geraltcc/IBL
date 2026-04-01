@@ -323,7 +323,8 @@ double update_conservation (scalar * conserved, scalar * updates, double dtmax)
                           (dim_idx == 2) ? n.z :
           #endif
                           0.;
-          ds[] -= p_val * area * n_comp / (cm[] * Delta);
+          double cm_safe = fmax(cs[], CS_FLOOR);
+          ds[] -= p_val * area * n_comp / (cm_safe * Delta);
         }
         idx++;
       }

@@ -17,9 +17,12 @@
 #define ibl_nu 1e-7
 #define ibl_H  1.5
 #define ibl_ReCf2 0.221
-#define ibl_alpha 0.5
-#define ibl_CFL 0.3
-#define ibl_niter 10000
+#define ibl_alpha 0.2
+#define ibl_CFL 0.1
+#define ibl_niter 100000
+// #define ibl_niter 0
+
+#define TE_RADIUS 2.0
 
 scalar d[];
 coord* p = NULL;
@@ -52,7 +55,7 @@ int main() {
     restore("restart");
     boundary(all);
     
-    FILE* fp = fopen("NACA0012_processed.gnu", "r");
+    FILE* fp = fopen("NACA0012_blunt.gnu", "r");
     p = input_xy(fp);
     distance(d, p);
     
@@ -74,6 +77,16 @@ int main() {
 
     build_cutcell_cache();
 
+    int count = 0;
+    foreach_cache(cutcells, reduction(+:count)) {
+        int cnt = 0;
+        foreach_neighbor(1) {
+            if (is_solid) cnt++;
+        }
+        if (cnt == 0) count++;
+    }
+    fprintf(stderr, "nested cutcells count: %d\n", count);
+
     // ========== 1. 计算 u_e 和流向 ==========
     foreach_cache(cutcells) {
         coord n, b;
@@ -93,10 +106,28 @@ int main() {
         double a_s = sqrt(gammao * p_s / rho_s);
         Me[] = ue[] / fmax(a_s, 1e-10);
     }
+
+    // foreach_cache(cutcells) {
+    //     double ux = w.x[] / rho[];
+    //     double uy = w.y[] / rho[];
+    //     ue[] = sqrt(sq(ux) + sq(uy));
+    // }
     boundary({ue, ue_vec});
 
-    // ========== 2. 计算 ∇_s u_e (Euler 解固定，只算一次) ==========
-    cutcell_tangential_gradient_lsq_backward(ue, grad_ue);
+    FILE* f_ue = fopen("data/ue.dat", "w");
+    fprintf(f_ue, "# x y ue\n");
+    foreach_cache(cutcells) {
+        // double dist = sqrt(sq(x - stag_x) + sq(y - stag_y));
+
+        fprintf(f_ue, "%.6e %.6e\n", x, w.x[]);
+    }
+    fflush(f_ue);
+    fclose(f_ue);
+    system("gnuplot plot_ue.gp");
+
+    double Delta_min = L0 / (1 << maxlevel);
+    double dtau = ibl_CFL * Delta_min;
+    double te_radius = TE_RADIUS * Delta_min;
 
     // ========== 3. 驻点识别 ==========
     double stag_x = 0., stag_y = 0., ue_min = HUGE;
@@ -125,14 +156,64 @@ int main() {
     fprintf(stderr, "IBL: stag=(%.4f, %.4f) ue_min=%.4e K=%.2f theta_stag=%.4e\n", 
         stag_x, stag_y, ue_min, K_stag, theta_stag);
 
+    // 尾缘识别
+    double te_x = stag_x, te_y = stag_y, dist_max = 0.;
+    foreach_cache(cutcells) {
+        double d = sq(x - stag_x) + sq(y - stag_y);
+        if (d >dist_max) {
+            dist_max = d;
+            te_x = x;
+            te_y = y;
+        }
+    }
+
+    fprintf(stderr, "IBL: te=(%.4f, %.4f)\n", te_x, te_y);
+
+    
+#define smooth_grad(g) do { \
+    foreach_cache(cutcells) { \
+        double dist_te = sqrt(sq(x - te_x) + sq(y - te_y)); \
+        if (dist_te < te_radius) { \
+            double w = 0.25 * (1.0 - cos(M_PI *dist_te / te_radius)); \
+            foreach_dimension() \
+                g.x[] *= w; \
+        }       \
+    } \
+} while (0)
+
+#define clean_grad(g) do { \
+    foreach_cache(cutcells) { \
+        double dist_te = sqrt(sq(x - te_x) + sq(y - te_y)); \
+        if (dist_te < 3.*Delta_min) { \
+            foreach_dimension() \
+                g.x[] = 0.; \
+        }       \
+    } \
+} while (0)
+
+#define clean_scalar(s) do { \
+    foreach_cache(cutcells) { \
+        double dist_te = sqrt(sq(x - te_x) + sq(y - te_y)); \
+        if (dist_te < 3.0*Delta_min) { \
+            s[] = 0.; \
+        } \
+    } \
+} while (0)
+
+    // ========== 2. 计算 ∇_s u_e (Euler 解固定，只算一次) ==========
+    cutcell_tangential_gradient_lsq_backward(ue, grad_ue);
+    // cutcell_tangential_gradient_lsq_forward_fixed(ue, grad_ue);
+    // smooth_grad(grad_ue);
+    // clean_grad(grad_ue);
+
     // ========== 4. 初始化 θ ==========
+
     foreach_cache(cutcells)
         ibl_theta[] = theta_stag;
     boundary({ibl_theta}); 
 
     // ========== 5. 伪时间迭代 ==========
-    double Delta_min = L0 / (1 << maxlevel);
-    double dtau = ibl_CFL * Delta_min;
+
     fprintf(stderr, "IBL: Delta_min=%.4e dtau=%.4e niter=%d\n",
         Delta_min, dtau, ibl_niter);
 
@@ -140,6 +221,9 @@ int main() {
 
     for (int iter = 0; iter < ibl_niter; iter++) {
         cutcell_tangential_gradient_lsq_backward(ibl_theta, grad_theta);
+        // cutcell_tangential_gradient_lsq_forward_fixed(ibl_theta, grad_theta);
+        // smooth_grad(grad_theta);
+        // clean_grad(grad_theta);
 
         double res_max = 0.;
         foreach_cache(cutcells) {
@@ -148,12 +232,35 @@ int main() {
                 ibl_theta[] = theta_stag;
                 continue;
             }
-        
-
+    
             double emag = sqrt(sq(ue_vec.x[]) + sq(ue_vec.y[]));
             if (emag < 1e-10) continue;
             double ex = ue_vec.x[] / emag;
             double ey = ue_vec.y[] / emag;
+
+            // double theta_here = ibl_theta[];
+            // double theta_up = theta_here;
+            // double dist_up = 0.;
+            // double dot_min = -1e-10;
+
+            // double x0 = x, y0 = y;
+
+            // foreach_neighbor(1) {
+            //     if (is_cutcell) {
+            //         double dx = x - x0, dy = y - y0;
+            //         double dot = dx*ex + dy*ey;
+            //         double dist = sqrt(sq(dx) + sq(dy));
+            //         if (dot < dot_min && dist > 1e-10) {
+            //             dot_min = dot;
+            //             theta_up = ibl_theta[];
+            //             dist_up = dist;
+            //         }
+            //     }
+            // }
+
+            // double dtheta_dxi = (dist_up > 1e-10) ? 
+            //     (theta_here - theta_up) / dist_up : 0.;
+
 
             double dtheta_dxi = ex * grad_theta.x[] + ey * grad_theta.y[];
             double due_dxi    = ex * grad_ue.x[]    + ey * grad_ue.y[];
@@ -165,28 +272,68 @@ int main() {
 
             double sum_th = 0.;
             int cnt = 0;
+            
+            double x0 = x, y0 = y;
             foreach_neighbor(1) {
-                if (is_cutcell) {
+                double dx = x - x0, dy = y - y0;
+                double dot = dx*ex + dy*ey;
+                if (is_cutcell && dot < 0.) {
                     sum_th += ibl_theta[];
                     cnt++;
                 }
             }
+
             double th_avg = (cnt > 0) ? 
                 (1. - ibl_alpha)*ibl_theta[] + ibl_alpha*sum_th/cnt : ibl_theta[];
 
-            double R = Cf2[] - dtheta_dxi - (2. + ibl_H) * ibl_theta[] / ue_safe * due_dxi;
+            double theta_new = th_avg + dtau * (Cf2[] - dtheta_dxi - (2. + ibl_H) * ibl_theta[] / ue_safe * due_dxi);
 
-            double theta_new = th_avg + dtau * R;
+            // double theta_new = ibl_theta[] + dtau * (Cf2[] - dtheta_dxi - (2. + ibl_H) * ibl_theta[] / ue_safe * due_dxi);
             if (theta_new < 1e-12) theta_new = 1e-12;
 
             double res = fabs(theta_new - ibl_theta[]);
             if (res > res_max) res_max = res;
 
+            // double dist_te = sqrt(sq(x - te_x) + sq(y - te_y));
+            // if (dist_te > te_radius)
             ibl_theta[] = theta_new;
         }
 
-        if (iter % 100 == 0)
-            fprintf(stderr, "[%04d] res_max=%.4e\n", iter, res_max);
+        // clean_scalar(ibl_theta);
+
+        if (iter % 1000 == 0) {
+            fprintf(stderr, "[%05d] res_max=%.4e\n", iter, res_max);
+            // if (res_max < 1e-10)
+            //     break;
+
+            FILE* f_theta = fopen("data/theta.dat", "w");
+            fprintf(f_theta, "# x y theta\n");
+            foreach_cache(cutcells) {
+                if (y > 0.) {
+                    double dist = sqrt(sq(x - stag_x) + sq(y - stag_y));
+
+                    fprintf(f_theta, "%.6e %.6e\n", dist, ibl_theta[]);
+                }
+            }
+            fflush(f_theta);
+            fclose(f_theta);
+
+            FILE* f_data = fopen("data/Cf2.dat", "w");
+            fprintf(f_data, "# x y Cf\n");
+            foreach_cache(cutcells) {
+                // double dist = sqrt(sq(x - stag_x) + sq(y - stag_y));
+                if (y > 0.) {
+                    double dist = fabs(x - stag_x);
+            
+                    fprintf(f_data, "%.6e %.6e\n", dist, Cf2[]*2.);
+                }
+            }
+            fflush(f_data);
+            fclose(f_data);
+
+            system("gnuplot plot_th.gp");
+            system("gnuplot plot_Cf.gp");
+        }
     }
     boundary({ibl_theta});
 
@@ -199,26 +346,9 @@ int main() {
     // save("output/ibl_theta.png");
     fprintf(stderr, "[info] theta_min=%.4e theta_max=%.4e\n", ibl_theta_min, ibl_theta_max);
 
-    FILE* f_data = fopen("data/Cf2.dat", "w");
-    fprintf(f_data, "# x y Cf\n");
-    foreach_cache(cutcells) {
-        // double dist = sqrt(sq(x - stag_x) + sq(y - stag_y));
-        double dist = fabs(x - stag_x);
 
-        fprintf(f_data, "%.6e %.6e\n", dist, Cf2[]*2.);
-    }
-    fflush(f_data);
-    fclose(f_data);
 
-    FILE* f_theta = fopen("data/theta.dat", "w");
-    fprintf(f_theta, "# x y theta\n");
-    foreach_cache(cutcells) {
-        double dist = sqrt(sq(x - stag_x) + sq(y - stag_y));
-
-        fprintf(f_theta, "%.6e %.6e\n", dist, ibl_theta[]);
-    }
-    fflush(f_theta);
-    fclose(f_theta);
+    plot_vof("grad_theta.x", "output/grad_theta.png");
 }
 
 double turbulent_Cf2(double Hk, double Re_th, double Me) {

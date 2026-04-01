@@ -1,1 +1,1 @@
-CC99='mpicc -std=c99 -D_GNU_SOURCE=1 -g' qcc -g -autolink -Wall -Wno-unused-function -pipe -D_FORTIFY_SOURCE=2 -O0 -D_MPI=1 -o test test.c -L$BASILISK/gl -I$BASILISK -lglutils -lfb_osmesa -lGLU -lOSMesa -lm
+CC99='mpicc -std=c99 -D_GNU_SOURCE=1 -g' qcc -g -disable-dimensions -autolink -Wall -Wno-unused-function -pipe -D_FORTIFY_SOURCE=2 -O0 -D_MPI=1 -o test test_2eq.c -L$BASILISK/gl -I$BASILISK -lglutils -lfb_osmesa -lGLU -lOSMesa -lm
