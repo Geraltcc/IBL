@@ -13,7 +13,11 @@
 
 #define mach 0.6
 #define rho0 1.
-#define p0 1.
+#define p0 (1./1.4)
+
+#define u_inf (mach * sqrt(gammao * p0 / rho0))
+#define E_inf (p0/(gammao - 1.) + 0.5 * rho0 * sq(u_inf))
+#define w_inf (rho0 * u_inf)
 
 scalar d[];
 coord* p = NULL;
@@ -23,6 +27,22 @@ scalar * my_dumplist = {rho, w.x, w.y, E, cs};
 scalar ue[];
 vector ue_grad[];
 
+void update_ue() {
+    foreach_cache(cutcells) {
+        coord n, b;
+        embed_geometry(point, &b, &n);
+
+        double rho_s = my_embed_interpolate(point, rho, b);
+        double ux = my_embed_interpolate(point, w.x, b) / rho_s;
+        double uy = my_embed_interpolate(point, w.y, b) / rho_s;
+        double un = ux * n.x + uy * n.y;
+        double etx = ux - un * n.x;
+        double ety = uy - un * n.y;
+        ue[] = sqrt(etx * etx + ety * ety);
+    }
+    boundary({ue});
+}
+
 int main() {
     L0 = 5.0;
     size(L0);
@@ -30,12 +50,14 @@ int main() {
     init_grid(1 << minlevel);
     origin(-L0/2., -L0/2.);
 
+    CFL = 0.3;
+
     run();
 }
 
 rho[left] = dirichlet(rho0);
-E[left] = dirichlet(p0/(gammao - 1.) + 0.5*rho0*sq(mach));
-w.x[left] = dirichlet(mach*rho0);
+E[left] = dirichlet(E_inf);
+w.x[left] = dirichlet(w_inf);
 w.y[left] = dirichlet(0.);
 
 // 流出边界
@@ -50,9 +72,11 @@ E[embed] = neumann(0.);
 w.n[embed] = dirichlet(0.);  // 无穿透
 w.t[embed] = neumann(0.);    // 滑移
 
+double stag_x = HUGE;
+
 event solid_init(i = 0) {
-    // FILE* fp = fopen("NACA0012_blunt.gnu", "r");
-    FILE* fp = fopen("NACA0012_processed.gnu", "r");
+    FILE* fp = fopen("NACA0012_blunt_new.gnu", "r");
+    // FILE* fp = fopen("NACA0012_processed.gnu", "r");
     p = input_xy(fp);
     distance(d, p);
     while(adapt_wavelet({d}, (double[]){1e-30}, maxlevel).nf);
@@ -60,15 +84,22 @@ event solid_init(i = 0) {
     do {
         solid(cs, fs, (d[]+d[-1]+d[0,-1]+d[-1,-1])/4.);
     } while (adapt_wavelet({cs}, (double[]){1e-30}, maxlevel).nf);
+
+    foreach(reduction(min:stag_x)) {
+        if (is_cutcell) {
+            if (x < stag_x)
+                stag_x = x;
+        }
+    }
 }
 
 event init(i = 0) {
     foreach() {
         if (cs[] > 0.) {
             rho[] = rho0;
-            w.x[] = mach * rho0;
+            w.x[] = w_inf;
             w.y[] = 0.;
-            E[] = p0/(gammao - 1.) + 0.5*rho0*sq(mach);
+            E[] = E_inf;
         } else {
             rho[] = 0.;
             w.x[] = 0.;
@@ -93,7 +124,7 @@ double cs_min = 0.;
 double scalar_max(scalar s) {
     double max = -HUGE;
     foreach(reduction(max:max)) {
-        if (max < s[]) {
+        if (max < s[] && !is_solid) {
             max = s[];
         }
     }
@@ -103,7 +134,7 @@ double scalar_max(scalar s) {
 double scalar_min(scalar s) {
     double min = HUGE;
     foreach(reduction(min:min)) {
-        if (min > s[]) {
+        if (min > s[] && !is_solid) {
             min = s[];
         }
     }
@@ -128,24 +159,38 @@ event logfile(i += 100) {
     fprintf(stderr, "[log] i: %04d t: %.4e dt: %.4e grid: %ld w_max: %.4e cs_min: %.4e dw: %.4e\n", i, t, dt, grid->n, w_max, cs_min, dw);
 }
 
-// event output(t += 1.0) {
-//     static int frame = 0;
-//     w_max = scalar_max(w.x);
-//     w_min = scalar_min(w.x);
+event output(t += 1.0) {
+    update_ue();
+    
+    static int frame = 0;
+    w_max = scalar_max(w.x);
+    w_min = scalar_min(w.x);
+    rho_max = scalar_max(rho);
+    rho_min = scalar_min(rho);
 
-//     w_min = fmax(0., w_min);
+    w_min = fmax(0., w_min);
 
-//     char filename[80];
+    char filename[80];
 
-//     sprintf(filename, "output/grid_%04d.png", frame);
-//     view(width = 2000, height = 2000, samples=8);
-//     clear();
-//     squares("w.x", map=viridis, min=w_min, max=w_max, linear=false);
-//     draw_vof("cs", "fs", lc={0., 0., 0.}, lw=1.0);
-//     colorbar(map=viridis, min=w_min, max=w_max, label="w.x", pos={-0.95, 0.});
-//     save(filename);
-//     frame++;
-// }
+    sprintf(filename, "output/grid_%04d.png", frame);
+    view(width = 2000, height = 2000, samples=8);
+    clear();
+    squares("rho", map=viridis, min=rho_min, max=rho_max, linear=false);
+    draw_vof("cs", "fs", lc={0., 0., 0.}, lw=1.0);
+    colorbar(map=viridis, min=rho_min, max=rho_max, label="rho", pos={-0.95, 0.});
+    save(filename);
+    frame++;
+
+    FILE* f_ue = fopen("data/ue.dat", "w");
+    fprintf(f_ue, "# x ue\n");
+    foreach_cache(cutcells) {
+        if (y > 0.)
+            fprintf(f_ue, "%.6e %.6e\n", x - stag_x, ue[]/0.6);
+    }
+    fflush(f_ue);
+    fclose(f_ue);
+    system("gnuplot plot_ue.gp");
+}
 
 // event test(t = 1.0) {
 
@@ -266,7 +311,23 @@ event logfile(i += 100) {
 //     }
 // }
 
-event end(t = 5.0) {
+// vector vec[];
+// event output(t = 0.1) {
+//     foreach()
+//         foreach_dimension()
+//             vec.x[] = 0.;
+
+//     foreach_cache(cutcells) {
+//         foreach_dimension()
+//             vec.x[] = w.x[];
+//     }
+//     view(width=2000, height=2000);
+//     clear();
+//     vectors("vec", scale=0.005, lw = 0.5);
+//     save("output/vector.png");
+// }
+
+event end(t = 10.0) {
     if (p) {
         free (p);
     }

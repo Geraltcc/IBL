@@ -14,7 +14,7 @@
 #define p0 1.
 
 #define ibl_nu 1e-7
-#define ibl_H  1.5
+// #define ibl_H  1.5
 #define ibl_ReCf2 0.221
 #define ibl_alpha 0.5
 #define ibl_CFL 0.1
@@ -29,10 +29,11 @@ scalar * dlist = {rho, w.x, w.y, E, cs};
 scalar ue[];
 scalar ibl_theta[];
 vector ue_vec[];
-vector grad_ue[];
+scalar grad_ue[];
 vector grad_theta[];
 scalar Cf2[];
 scalar Me[];
+scalar ibl_H[];
 
 scalar delta[];
 vector grad_delta[];
@@ -92,7 +93,7 @@ int main() {
         Cf2[] = 0.;
         foreach_dimension() {
             ue_vec.x[] = 0.;
-            grad_ue.x[] = 0.;
+            grad_ue[] = 0.;
             grad_theta.x[] = 0.;
         }
     }
@@ -217,11 +218,15 @@ event logfile(i += 100) {
 // }
 
 double cal_Cf2(double Ma, double Re, double Hk) {
-    double Fc = sqrt(1. + 0.2*sq(Ma));
-    return fmax(0.5 * 0.3 * exp(-1.33 * Hk) 
-        * pow(log10(fmax(Re/Fc, 2.0)), -1.74 - 0.31*Hk)
-        + 0.00011 * (tanh(4. - Hk/0.875) - 1.), 0.);
+    // double Fc = sqrt(1. + 0.2*sq(Ma));
+    // return fmax(0.5 * 0.3 * exp(-1.33 * Hk) 
+    //     * pow(log10(fmax(Re/Fc, 2.0)), -1.74 - 0.31*Hk)
+    //     + 0.00011 * (tanh(4. - Hk/0.875) - 1.), 0.);
+
+    return 0.5 * 0.01013/(log10(fmax(Re, 1000.)) - 1.02);
 }
+
+
 
 double stag_x = 0.;
 double stag_y = 0.;
@@ -290,6 +295,63 @@ event ibl_theta_init(i = 0) {
     } \
 } while (0)
 
+double upwind_grad(scalar s, coord e, Point point) {
+    coord x0 = {x, y};
+
+    double s0 = s[];
+    double sum = 0., w = 0.;
+
+    foreach_neighbor(1) {
+        if (!is_cutcell) continue;
+        
+        coord dx = {x - x0.x, y - x0.y};
+        double dist2 = sq(dx.x) + sq(dx.y);
+        
+        if (dist2 < 1e-10) continue;
+
+        double dot = dx.x * e.x + dx.y * e.y;
+
+        if (dot < 0.) {
+            double ds = -dot;
+            double wt = ds / dist2;
+            double slope = (s0 - s[]) / ds;
+            sum += wt * slope;
+            w += wt;
+        }
+    }
+    return (w > 0.) ? sum / w : 0.;
+}
+
+double central_grad (scalar s, coord e, Point point) {
+    coord x0 = {x, y};
+    
+    double s0 = s[];
+    double sum = 0., wt_sum = 0.;
+
+    foreach_neighbor(1) {
+        if (!is_cutcell) continue;
+
+        coord dx = {x - x0.x, y - x0.y};
+
+        double dist2 = sq(dx.x) + sq(dx.y);
+        if (dist2 < 1e-10) continue;
+
+        double dot = dx.x * e.x + dx.y * e.y;
+
+        if (fabs(dot) > 1e-20) {
+            double wt = 1. / dist2;
+            sum += wt * (s[] - s0) / dot;
+            wt_sum += wt;
+        }
+    }
+    return (wt_sum > 0.) ? sum / wt_sum : 0.;
+}
+
+double cal_ibl_H(double Re) {
+    double H = 1.25 + 75./fmax(Re, 100.);
+    return H;
+}
+
 event ibl_theta_equation(i++) {
     update_ue();
     // foreach_cache(cutcells) {
@@ -297,6 +359,8 @@ event ibl_theta_equation(i++) {
 
     //     ue[] *= (1. + delta_star / Delta);
     // }
+    if (t > 0.1) {
+
     foreach_cache(cutcells) {
         double dist_stag = sqrt(sq(x - stag_x) + sq(y - stag_y));
         double dist_tail = fabs(x - tail_x);
@@ -305,96 +369,102 @@ event ibl_theta_equation(i++) {
             continue;
         }
 
-        double x0 = x, y0 = y;
-        double theta0 = ibl_theta[];
-        double ue0 = ue[];
-        double ex0 = ue_vec.x[], ey0 = ue_vec.y[];
+        // double x0 = x, y0 = y;
+        // double theta0 = ibl_theta[];
+        // double ue0 = ue[];
+        // double ex0 = ue_vec.x[], ey0 = ue_vec.y[];
 
+        // double sum_dtheta = 0., w_dtheta = 0.;
 
-        double sum_dtheta = 0., w_dtheta = 0.;
+        // double sum_due = 0., w_due = 0.;
 
-        double sum_due = 0., w_due = 0.;
+        // foreach_neighbor(1) {
+        //     if (!is_cutcell) continue;
+        //     double dx = x - x0, dy = y - y0;
+        //     double dist2 = sq(dx) + sq(dy);
+        //     if (dist2 < 1e-10) continue;
 
-        foreach_neighbor(1) {
-            if (!is_cutcell) continue;
-            double dx = x - x0, dy = y - y0;
-            double dist2 = sq(dx) + sq(dy);
-            if (dist2 < 1e-10) continue;
+        //     double dot = dx * ex0 + dy * ey0;
+        //     if (dot < 0.) {
+        //         double ds = -dot;
+        //         double wt = ds / dist2;
+        //         double slope = (theta0 - ibl_theta[]) / ds;
+        //         sum_dtheta += wt * slope;
+        //         w_dtheta += wt;
+        //     }
 
-            double dot = dx * ex0 + dy * ey0;
-            if (dot < 0.) {
-                double ds = -dot;
-                double wt = ds / dist2;
-                double slope = (theta0 - ibl_theta[]) / ds;
-                sum_dtheta += wt * slope;
-                w_dtheta += wt;
-            }
+        //     if (fabs(dot) > 1e-20) {
+        //         double wt = 1./dist2;
+        //         double slope = (ue[] - ue0) / dot;
+        //         sum_due += wt * slope;
+        //         w_due += wt;
+        //     }
+        // }
 
-            if (fabs(dot) > 1e-20) {
-                double wt = 1./dist2;
-                double slope = (ue[] - ue0) / dot;
-                sum_due += wt * slope;
-                w_due += wt;
-            }
-        }
-
-        double dtheta_dxi = (w_dtheta > 0.) ? sum_dtheta / w_dtheta : 0.;
-        double due_dxi = (w_due > 0.) ? sum_due / w_due : 0.;
+        // double dtheta_dxi = (w_dtheta > 0.) ? sum_dtheta / w_dtheta : 0.;
+        // double due_dxi = (w_due > 0.) ? sum_due / w_due : 0.;
+        coord e = {ue_vec.x[], ue_vec.y[]};
+        double dtheta_dxi = upwind_grad(ibl_theta, e, point);
+        double due_dxi = central_grad(ue, e, point);
+        grad_ue[] = due_dxi;
 
         double ue_safe = fmax(ue[], 1e-8);
-        double Re_th = ue_safe * ibl_theta[] / ibl_nu;
-        double Hk = (ibl_H - 0.290 * sq(Me[])) / (1. + 0.113 * sq(Me[]));
+        double Re_th = rho[] * ue_safe * ibl_theta[] / ibl_nu;
+
+        ibl_H[] = cal_ibl_H(Re_th);
+        
+        double Hk = (ibl_H[] - 0.290 * sq(Me[])) / (1. + 0.113 * sq(Me[]));
         Cf2[] = cal_Cf2(Me[], Re_th, Hk);
         
-        double due_max = ue_safe / Delta;
-        due_dxi = fmax(fmin(due_dxi, due_max), -due_max);
+        // double due_max = ue_safe / Delta;
+        // due_dxi = fmax(fmin(due_dxi, due_max), -due_max);
         
         double theta_new = ibl_theta[] + ibl_dt * (
             Cf2[] - dtheta_dxi - 
-            (2. + ibl_H - sq(Me[])) * ibl_theta[] / ue_safe * due_dxi
+            (2. + ibl_H[] - sq(Me[])) * ibl_theta[] / ue_safe * due_dxi
         );
         theta_new = fmax(theta_new, 0.);
         ibl_theta[] = theta_new;
     }
 
-    foreach_cache(cutcells) {
-        delta[] = rho[] * ibl_H * ibl_theta[] * ue[];
-    }
+    // foreach_cache(cutcells) {
+    //     delta[] = rho[] * ibl_H * ibl_theta[] * ue[];
+    // }
     
-    foreach_cache(cutcells) {
-        coord n, b;
-        double area = embed_geometry(point, &b, &n);
-        foreach_dimension()
-            n.x *= -1.;
+    // foreach_cache(cutcells) {
+    //     coord n, b;
+    //     double area = embed_geometry(point, &b, &n);
+    //     foreach_dimension()
+    //         n.x *= -1.;
 
-        double x0 = x, y0 = y;
-        double delta0 = delta[];
-        double ex0 = ue_vec.x[], ey0 = ue_vec.y[];
+    //     double x0 = x, y0 = y;
+    //     double delta0 = delta[];
+    //     double ex0 = ue_vec.x[], ey0 = ue_vec.y[];
 
-        double sum_ddelta = 0., w_ddelta = 0.;
-        foreach_neighbor(1) {
-            if (!is_cutcell) continue;
-            double dx = x - x0, dy = y - y0;
-            double dist2 = sq(dx) + sq(dy);
-            if (dist2 < 1e-10) continue;
-            double dot = dx * ex0 + dy * ey0;
-            if (dot < 0.) {
-                double ds = -dot;
-                double wt = ds / dist2;
-                double slope = (delta0 - delta[]) / ds;
-                sum_ddelta += wt * slope;
-                w_ddelta += wt;
-            }
-        }
-        double ddelta_ds = (w_ddelta > 0.) ? sum_ddelta / w_ddelta : 0.;
-        double vn = ddelta_ds / rho[];
-        double ue_local = fmax(ue[], 1e-8);
-        double vn_max = 0.1 * ue_local;
-        vn = fmax(fmin(vn, vn_max), -vn_max);
+    //     double sum_ddelta = 0., w_ddelta = 0.;
+    //     foreach_neighbor(1) {
+    //         if (!is_cutcell) continue;
+    //         double dx = x - x0, dy = y - y0;
+    //         double dist2 = sq(dx) + sq(dy);
+    //         if (dist2 < 1e-10) continue;
+    //         double dot = dx * ex0 + dy * ey0;
+    //         if (dot < 0.) {
+    //             double ds = -dot;
+    //             double wt = ds / dist2;
+    //             double slope = (delta0 - delta[]) / ds;
+    //             sum_ddelta += wt * slope;
+    //             w_ddelta += wt;
+    //         }
+    //     }
+    //     double ddelta_ds = (w_ddelta > 0.) ? sum_ddelta / w_ddelta : 0.;
+    //     double vn = ddelta_ds / rho[];
+    //     double ue_local = fmax(ue[], 1e-8);
+    //     double vn_max = 0.1 * ue_local;
+    //     vn = fmax(fmin(vn, vn_max), -vn_max);
         
-        foreach_dimension()
-            w.x[] += n.x * vn * dt * area / (cm[] * Delta);
-    }
+    //     foreach_dimension()
+    //         w.x[] += n.x * vn * dt * area / (cm[] * Delta);
+    // }
 
     if (i % 50 == 0) {
         FILE* f_theta = fopen("data/theta.dat", "w");
@@ -417,15 +487,25 @@ event ibl_theta_equation(i++) {
         fclose(f_ue);
         system("gnuplot plot_ue.gp");
 
-        FILE* f_delta = fopen("data/delta.dat", "w");
-        fprintf(f_delta, "# x delta\n");
+        FILE* f_H = fopen("data/H.dat", "w");
+        fprintf(f_H, "# x H\n");
         foreach_cache(cutcells) {
             if (y > 0.)
-                fprintf(f_delta, "%.6e %.6e\n", x - stag_x, delta[]);
+                fprintf(f_H, "%.6e %.6e\n", x - stag_x, ibl_H[]);
         }
-        fflush(f_delta);
-        fclose(f_delta);
-        system("gnuplot plot_delta.gp");
+        fflush(f_H);
+        fclose(f_H);
+        system("gnuplot plot_H.gp");
+
+        // FILE* f_delta = fopen("data/delta.dat", "w");
+        // fprintf(f_delta, "# x delta\n");
+        // foreach_cache(cutcells) {
+        //     if (y > 0.)
+        //         fprintf(f_delta, "%.6e %.6e\n", x - stag_x, delta[]);
+        // }
+        // fflush(f_delta);
+        // fclose(f_delta);
+        // system("gnuplot plot_delta.gp");
 
         FILE* f_Cf = fopen("data/Cf2.dat", "w");
         fprintf(f_Cf, "# x Cf2\n");
@@ -436,6 +516,18 @@ event ibl_theta_equation(i++) {
         fflush(f_Cf);
         fclose(f_Cf);
         system("gnuplot plot_Cf.gp");
+
+        FILE* f_gu = fopen("data/grad_ue.dat", "w");
+        fprintf(f_gu, "# x grad_ue\n");
+        foreach_cache(cutcells) {
+            if (y < 0.)
+                fprintf(f_gu, "%.6e %.6e\n", x - stag_x, grad_ue[]);
+        }
+        fflush(f_gu);
+        fclose(f_gu);
+        system("gnuplot plot_ug.gp");
+    }
+
     }
 }
 
@@ -445,11 +537,27 @@ event output (t += 0.1) {
     fprintf(f_ue, "# x ue\n");
     foreach_cache(cutcells) {
         if (y > 0.)
-            fprintf(f_ue, "%.6e %.6e\n", x + 1.5015, ue[]/0.6);
+            fprintf(f_ue, "%.6e %.6e\n", x - stag_x, ue[]/0.6);
     }
     fflush(f_ue);
     fclose(f_ue);
     system("gnuplot plot_ue.gp");
+
+    FILE* f_ue_vec = fopen("data/ue_vec.dat", "w");
+    fprintf(f_ue_vec, "# x ue_vec\n");
+    foreach_cache(cutcells) {
+        if (y > 0.)
+            fprintf(f_ue_vec, "%.6e %.6e\n", x - stag_x, ue_vec.x[]);
+    }
+    fflush(f_ue_vec);
+    fclose(f_ue_vec);
+    system("gnuplot plot_ue_vec.gp");
+
+    view(width=2000, height=2000);
+    clear();
+    squares("grad_ue", map=viridis, linear = false);
+    colorbar(map=viridis, label="grad_ue", pos={-0.95, 0.});
+    save("output/grad_ue.png");
 }
 
 // event movies (t += 0.1) {

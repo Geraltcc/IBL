@@ -14,12 +14,12 @@
 #define p0 1.
 
 #define ibl_nu 1e-7
-#define ibl_H  1.5
+// #define ibl_H  1.5
 #define ibl_ReCf2 0.221
 #define ibl_alpha 0.5
 #define ibl_CFL 0.1
 #define ibl_dt 1e-4
-#define ibl_niter 5
+#define ibl_niter 100
 
 scalar d[];
 coord* p = NULL;
@@ -33,8 +33,8 @@ vector grad_ue[];
 vector grad_theta[];
 scalar Cf2[];
 scalar Me[];
-scalar H[];
-scalar H_star[];
+scalar ibl_H[];
+// scalar H_star[];
 
 scalar delta[];
 vector grad_delta[];
@@ -226,7 +226,7 @@ double stag_y = 0.;
 double ue_min = HUGE;
 double tail_x = 0.;
 
-event ibl_theta_init(t = 0.1) {
+event ibl_theta_init(i = 0) {
     // get ue
     update_ue();
 
@@ -237,8 +237,7 @@ event ibl_theta_init(t = 0.1) {
             stag_y = y;
         }
         ibl_theta[] = 1e-6;
-        H[] = ibl_H;
-        H_star[] = ibl_H;
+        ibl_H[] = 1.4;
     }
 
     tail_x = -HUGE;
@@ -254,39 +253,22 @@ event ibl_theta_init(t = 0.1) {
     }
 }
 
-#define clean_grad(g) do { \
-    foreach_cache(cutcells) { \
-        double dist_te = sqrt(sq(x - te_x) + sq(y - te_y)); \
-        if (dist_te < 0.03) { \
-            foreach_dimension() \
-                g.x[] = 0.; \
-        }       \
-    } \
-} while (0)
-
-double upwind_grad(scalar s, Point point) {
-    coord e, dx, x0 = {0.};
-    foreach_dimension()
-        x0.x = x;
-
-    foreach_dimension()
-        e.x = ue_vec.x[];
+double upwind_grad(scalar s, coord e, Point point) {
+    coord x0 = {x, y};
 
     double s0 = s[];
     double sum = 0., w = 0.;
-    double dist2 = 0.;
 
     foreach_neighbor(1) {
         if (!is_cutcell) continue;
-        foreach_dimension() {
-            dx.x = x - x0.x;
-            dist2 += sq(dx.x);
-        }
+        
+        coord dx = {x - x0.x, y - x0.y};
+        double dist2 = sq(dx.x) + sq(dx.y);
+        
         if (dist2 < 1e-10) continue;
 
-        double dot = 0.;
-        foreach_dimension()
-            dot += dx.x * e.x;
+        double dot = dx.x * e.x + dx.y * e.y;
+
         if (dot < 0.) {
             double ds = -dot;
             double wt = ds / dist2;
@@ -298,105 +280,196 @@ double upwind_grad(scalar s, Point point) {
     return (w > 0.) ? sum / w : 0.;
 }
 
+double central_grad (scalar s, coord e, Point point) {
+    coord x0 = {x, y};
+    
+    double s0 = s[];
+    double sum = 0., wt_sum = 0.;
+
+    foreach_neighbor(1) {
+        if (!is_cutcell) continue;
+
+        coord dx = {x - x0.x, y - x0.y};
+
+        double dist2 = sq(dx.x) + sq(dx.y);
+        if (dist2 < 1e-10) continue;
+
+        double dot = dx.x * e.x + dx.y * e.y;
+
+        if (fabs(dot) > 1e-20) {
+            double wt = 1. / dist2;
+            sum += wt * (s[] - s0) / dot;
+            wt_sum += wt;
+        }
+    }
+    return (wt_sum > 0.) ? sum / wt_sum : 0.;
+}
+
 #define clamp(val, edge) val = fmax(fmin(val, edge), -edge)
 
-#define front_tail_handling() do { \
+#define front_tail_handling() \
     double dist_stag = sqrt(sq(x - stag_x) + sq(y - stag_y)); \
     double dist_tail = fabs(x - tail_x); \
     if (dist_stag < 3.0 * Delta || dist_tail < 3.0 * Delta) { \
         ibl_theta[] = 1e-6; \
         continue; \
     } \
-} while (0)
 
-event ibl_theta_equation(t >= 0.1; i++) {
+
+event ibl_theta_equation(i++) {
     update_ue();
 
-    // 更新 H_star
-    foreach_cache(cutcells) {
-        front_tail_handling();
+    if (t > 0.2) {
 
-        double ue_safe = fmax(ue[], 1e-8);
-        double Re_th = ue_safe * ibl_theta[] / ibl_nu;
-        double Hk = cal_Hk(Me[], H[]);
-        H_star[] = cal_H_star(Re_th, Hk);
-        // double H_2star = cal_H_2star(Me[], Hk);
-        Cf2[] = cal_Cf2(Me[], Re_th, Hk);
-    }
+    // 更新 Hstar
+    for (int iter = 0; iter < ibl_niter; iter++) {
 
-    // 计算 theta 方程
-    foreach_cache(cutcells) {
-        front_tail_handling();
+        // 计算 theta 方程
+        scalar theta_tmp[];
+        scalar H_tmp[];
+        foreach_cache(cutcells) {
+            front_tail_handling();
 
-        double dtheta_dxi = upwind_grad(ibl_theta, point);
-        double due_dxi = upwind_grad(ue, point);
-        double ue_safe = fmax(ue[], 1e-8);
-        double due_max = ue_safe / Delta;
-        clamp(due_dxi, due_max);
-        
-        double theta_new = ibl_theta[] + ibl_dt * (
-            Cf2[] - dtheta_dxi - 
-            (2. + ibl_H - sq(Me[])) * ibl_theta[] / ue_safe * due_dxi
-        );
-        theta_new = fmax(theta_new, 0.);
-        ibl_theta[] = theta_new;
-    }
+            // double ue_safe = fmax(ue[], 1e-8);
+            // double Re_th = ue_safe * ibl_theta[] / ibl_nu;
+            // double Hk = cal_Hk(Me[], H[]);
 
-    foreach_cache(cutcells) {
-        front_tail_handling();
+            coord e = {ue_vec.x[], ue_vec.y[]};
+            double dtheta_dxi = upwind_grad(ibl_theta, e, point);
+            double due_dxi = central_grad(ue, e, point);
+            double ue_safe = fmax(ue[], 1e-8);
+            
+            double theta_new = ibl_theta[] + ibl_dt * (
+                Cf2[] - dtheta_dxi - 
+                (2. + ibl_H[] - sq(Me[])) * ibl_theta[] / ue_safe * due_dxi
+            );
+            theta_new = fmax(theta_new, 0.);
+            theta_tmp[] = theta_new;
 
-        delta[] = rho[] * ibl_H * ibl_theta[] * ue[];
-    }
-    
-    foreach_cache(cutcells) {
-        front_tail_handling();
+            // ================ H Equation =================
+            double Re_th = fmax(rho[] * ue_safe * ibl_theta[] / ibl_nu, 1e-4);
+            double Hk = fmax(cal_Hk(Me[], ibl_H[]), 1e-4);
+            double H_star = cal_H_star(Re_th, Hk);
+            Cf2[] = cal_Cf2(Me[], Re_th, Hk);
+            double Us = cal_Us(ibl_H[], Hk, H_star);
+            double Ctau = cal_Ctau_eq(ibl_H[], Hk, H_star, Us);
+            double Cd = cal_Cd(Cf2[], Us, Ctau);
 
-        coord n, b;
-        double area = embed_geometry(point, &b, &n);
-        foreach_dimension()
-            n.x *= -1.;
+            double H_2star = cal_H_2star(Me[], Hk);
 
-        double x0 = x, y0 = y;
-        double delta0 = delta[];
-        double ex0 = ue_vec.x[], ey0 = ue_vec.y[];
+            // double dH_dxi = upwind_grad(ibl_H, e, point);
 
-        double sum_ddelta = 0., w_ddelta = 0.;
-        foreach_neighbor(1) {
-            if (!is_cutcell) continue;
-            double dx = x - x0, dy = y - y0;
-            double dist2 = sq(dx) + sq(dy);
-            if (dist2 < 1e-10) continue;
-            double dot = dx * ex0 + dy * ey0;
-            if (dot < 0.) {
-                double ds = -dot;
-                double wt = ds / dist2;
-                double slope = (delta0 - delta[]) / ds;
-                sum_ddelta += wt * slope;
-                w_ddelta += wt;
-            }
+            double eps = 1e-6;
+            double H_p = ibl_H[] + eps;
+            double Hk_p = fmax(cal_Hk(Me[], H_p), 1e-4);
+            double H_star_p = cal_H_star(Re_th, Hk_p);
+            double dHstar_dH = (H_star_p - H_star) / eps;
+
+            double RHS_H = 2.0*Cd - H_star*Cf2[] 
+                - (2.0*H_2star + H_star*(1.0 - ibl_H[])) * (ibl_theta[]/ue_safe) * due_dxi;
+            double dHdxi_star = RHS_H / (ibl_theta[] * dHstar_dH + 1e-10);
+            double H_new = ibl_H[] + ibl_dt * dHdxi_star;
+   
+            H_tmp[] = H_new;
         }
-        double ddelta_ds = (w_ddelta > 0.) ? sum_ddelta / w_ddelta : 0.;
-        double vn = ddelta_ds / rho[];
-        double ue_local = fmax(ue[], 1e-8);
-        double vn_max = 0.1 * ue_local;
-        vn = fmax(fmin(vn, vn_max), -vn_max);
-        
-        foreach_dimension()
-            w.x[] += n.x * vn * dt * area / (cm[] * Delta);
+
+        // 更新变量
+        foreach_cache(cutcells) {
+            front_tail_handling();
+            ibl_theta[] = theta_tmp[];
+            ibl_H[] = H_tmp[];
+        }
     }
+
+    if (i % 100 == 0) {
+        FILE* f_theta = fopen("data/theta.dat", "w");
+        fprintf(f_theta, "# x theta\n");
+        foreach_cache(cutcells) {
+            if (y > 0.)
+                fprintf(f_theta, "%.6e %.6e\n", x - stag_x, ibl_theta[]);
+        }
+        fflush(f_theta);
+        fclose(f_theta);
+        system("gnuplot plot_th.gp");
+
+        // FILE* f_delta = fopen("data/delta.dat", "w");
+        // fprintf(f_delta, "# x delta\n");
+        // foreach_cache(cutcells) {
+        //     if (y > 0.)
+        //         fprintf(f_delta, "%.6e %.6e\n", x - stag_x, delta[]);
+        // }
+        // fflush(f_delta);
+        // fclose(f_delta);
+        // system("gnuplot plot_delta.gp");
+
+        FILE* f_Cf = fopen("data/Cf2.dat", "w");
+        fprintf(f_Cf, "# x Cf2\n");
+        foreach_cache(cutcells) {
+            if (y > 0.)
+                fprintf(f_Cf, "%.6e %.6e\n", x - stag_x, Cf2[]*2.);
+        }
+        fflush(f_Cf);
+        fclose(f_Cf);
+        system("gnuplot plot_Cf.gp");
+
+        FILE* f_H = fopen("data/H.dat", "w");
+        fprintf(f_H, "# x H\n");
+        foreach_cache(cutcells) {
+            if (y > 0.)
+                fprintf(f_H, "%.6e %.6e\n", x - stag_x, ibl_H[]);
+        }
+        fflush(f_H);
+        fclose(f_H);
+        system("gnuplot plot_H.gp");
+    }
+
+    }
+
+    // foreach_cache(cutcells) {
+    //     front_tail_handling();
+
+    //     delta[] = rho[] * ibl_H * ibl_theta[] * ue[];
+    // }
+    
+    // foreach_cache(cutcells) {
+    //     front_tail_handling();
+
+    //     coord n, b;
+    //     double area = embed_geometry(point, &b, &n);
+    //     foreach_dimension()
+    //         n.x *= -1.;
+
+    //     double x0 = x, y0 = y;
+    //     double delta0 = delta[];
+    //     double ex0 = ue_vec.x[], ey0 = ue_vec.y[];
+
+    //     double sum_ddelta = 0., w_ddelta = 0.;
+    //     foreach_neighbor(1) {
+    //         if (!is_cutcell) continue;
+    //         double dx = x - x0, dy = y - y0;
+    //         double dist2 = sq(dx) + sq(dy);
+    //         if (dist2 < 1e-10) continue;
+    //         double dot = dx * ex0 + dy * ey0;
+    //         if (dot < 0.) {
+    //             double ds = -dot;
+    //             double wt = ds / dist2;
+    //             double slope = (delta0 - delta[]) / ds;
+    //             sum_ddelta += wt * slope;
+    //             w_ddelta += wt;
+    //         }
+    //     }
+    //     double ddelta_ds = (w_ddelta > 0.) ? sum_ddelta / w_ddelta : 0.;
+    //     double vn = ddelta_ds / rho[];
+    //     double ue_local = fmax(ue[], 1e-8);
+    //     double vn_max = 0.1 * ue_local;
+    //     vn = fmax(fmin(vn, vn_max), -vn_max);
+        
+    //     foreach_dimension()
+    //         w.x[] += n.x * vn * dt * area / (cm[] * Delta);
+    // }
 }
 
-event output(t += 0.1) {
-    FILE* f_theta = fopen("data/theta.dat", "w");
-    fprintf(f_theta, "# x theta\n");
-    foreach_cache(cutcells) {
-        if (y > 0.)
-            fprintf(f_theta, "%.6e %.6e\n", x - stag_x, ibl_theta[]);
-    }
-    fflush(f_theta);
-    fclose(f_theta);
-    system("gnuplot plot_th.gp");
-
+event output(t += 0.01) {
     FILE* f_ue = fopen("data/ue.dat", "w");
     fprintf(f_ue, "# x ue\n");
     foreach_cache(cutcells) {
@@ -406,26 +479,6 @@ event output(t += 0.1) {
     fflush(f_ue);
     fclose(f_ue);
     system("gnuplot plot_ue.gp");
-
-    FILE* f_delta = fopen("data/delta.dat", "w");
-    fprintf(f_delta, "# x delta\n");
-    foreach_cache(cutcells) {
-        if (y > 0.)
-            fprintf(f_delta, "%.6e %.6e\n", x - stag_x, delta[]);
-    }
-    fflush(f_delta);
-    fclose(f_delta);
-    system("gnuplot plot_delta.gp");
-
-    FILE* f_Cf = fopen("data/Cf2.dat", "w");
-    fprintf(f_Cf, "# x Cf2\n");
-    foreach_cache(cutcells) {
-        if (y > 0.)
-            fprintf(f_Cf, "%.6e %.6e\n", x - stag_x, Cf2[]*2.);
-    }
-    fflush(f_Cf);
-    fclose(f_Cf);
-    system("gnuplot plot_Cf.gp");
 }
 
 event end(t = 10.0);

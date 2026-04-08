@@ -65,18 +65,6 @@ double my_embed_interpolate (Point point, scalar s, coord b)
 extern scalar * scalars;
 extern vector * myvectors;
 
-extern scalar rho, E;
-extern vector w;
-extern double gammao;
-
-/**
-as well as a function which, given the state of each quantity,
-returns the fluxes and the minimum/maximum eigenvalues
-(i.e. `eigenvalue[0]`/`eigenvalue[1]`) of the corresponding Riemann
-problem. */
-
-void flux (const double * state, double * flux, double * eigenvalue);
-
 /**
 ## Time-integration
 
@@ -86,6 +74,54 @@ Time integration will be done with a generic
 [predictor-corrector](predictor-corrector.h) scheme. */
 
 #include "predictor-corrector.h"
+// #include "local-timestepping.h"
+
+extern scalar rho, E;
+extern vector w;
+extern double gammao;
+
+static void advance_lts_compressible (scalar * output, scalar * input,
+                                      scalar * updates, double dt_global)
+{
+  foreach() {
+    if (cs[] <= 0.) {
+      scalar o;
+      for (o in output)
+        o[] = 0.;
+    continue;
+    } 
+
+    if (cs[] < CS_FLOOR)
+      continue;
+  
+    double rho_v = rho[], w2 = 0.;
+    foreach_dimension()
+      w2 += sq(w.x[]);
+
+    double dt_local = dt_global;
+    if (rho_v > 1e-30) {
+      double p_v = (gammao - 1.) * (E[] - 0.5 * w2 / rho_v);
+      if (p_v < 0.) p_v = 1e-30;
+      double a = sqrt(w2) / rho_v + sqrt(gammao * p_v / rho_v);
+      if (a > 0.)
+        dt_local = CFL * Delta / a;
+    }
+
+    scalar o, i, u;
+    for (o,i,u in output, input, updates)
+      o[] = i[] + dt_local * u[];
+  }
+
+  boundary (evolving);
+}
+
+/**
+as well as a function which, given the state of each quantity,
+returns the fluxes and the minimum/maximum eigenvalues
+(i.e. `eigenvalue[0]`/`eigenvalue[1]`) of the corresponding Riemann
+problem. */
+
+void flux (const double * state, double * flux, double * eigenvalue);
 
 /**
 The generic time-integration scheme in `predictor-corrector.h` needs
@@ -100,12 +136,13 @@ event defaults (i = 0)
 {
   evolving = list_concat (scalars, (scalar *) myvectors);
   update = update_conservation;
+  // lts_advance = advance_lts_compressible;
 
   /**
   We switch to a pure minmod limiter by default for increased
   robustness. */
   
-  theta = 1.;
+  theta = 1.0;
 
   /**
   With the MUSCL scheme we use the CFL depends on the dimension of the
@@ -171,6 +208,126 @@ static double riemann (const double * right, const double * left,
   return dtmax;
 }
 
+static double riemann_hllc (double * right, double * left,
+                             double Delta, double * f, int len,
+                             double dtmax)
+{
+  // 两侧都无效 → 零通量
+  double rhoL = left[0], rhoR = right[0];
+  if ((rhoL <= 0. || rhoL != rhoL) && (rhoR <= 0. || rhoR != rhoR)) {
+    for (int i = 0; i < len; i++)
+      f[i] = 0.;
+    return dtmax;
+  }
+
+  // 只有左侧无效 → 用右侧状态做零阶外推
+  if (rhoL <= 0. || rhoL != rhoL) {
+    for (int i = 0; i < len; i++)
+      left[i] = right[i];   // 注意：left 需要是非 const 的，或者用局部拷贝
+  }
+
+  // 只有右侧无效 → 用左侧状态做零阶外推
+  if (rhoR <= 0. || rhoR != rhoR) {
+    for (int i = 0; i < len; i++)
+      right[i] = left[i];
+  }
+
+  rhoL = left[0];
+  rhoR = right[0];
+
+  // 左状态
+  double EL = left[1], wnL = left[2];
+  double w2L = 0.;
+  for (int i = 2; i < 2 + dimension; i++) w2L += sq(left[i]);
+  double uL = wnL/rhoL;
+  double pL = (gammao - 1.)*(EL - 0.5*w2L/rhoL);
+  if (pL < 0.) pL = 0.;
+  double cL = sqrt(gammao*pL/rhoL);
+
+  // 右状态
+  double ER = right[1], wnR = right[2];
+  double w2R = 0.;
+  for (int i = 2; i < 2 + dimension; i++) w2R += sq(right[i]);
+  double uR = wnR/rhoR;
+  double pR = (gammao - 1.)*(ER - 0.5*w2R/rhoR);
+  if (pR < 0.) pR = 0.;
+  double cR = sqrt(gammao*pR/rhoR);
+
+  // 波速估计 (Einfeldt/Davis)
+  double SL = min(uL - cL, uR - cR);
+  double SR = max(uL + cL, uR + cR);
+
+  // 接触波速 S*
+  double Sstar = (pR - pL + rhoL*uL*(SL - uL) - rhoR*uR*(SR - uR))
+               / (rhoL*(SL - uL) - rhoR*(SR - uR));
+
+  if (SL >= 0.) {
+    // 全部取左通量
+    f[0] = wnL;
+    f[1] = uL*(EL + pL);
+    f[2] = uL*wnL + pL;
+    for (int i = 3; i < 2 + dimension; i++)
+      f[i] = uL*left[i];
+  }
+  else if (SR <= 0.) {
+    // 全部取右通量
+    f[0] = wnR;
+    f[1] = uR*(ER + pR);
+    f[2] = uR*wnR + pR;
+    for (int i = 3; i < 2 + dimension; i++)
+      f[i] = uR*right[i];
+  }
+  else {
+    // 中间状态
+    double fL[len], fR[len];
+    fL[0] = wnL;
+    fL[1] = uL*(EL + pL);
+    fL[2] = uL*wnL + pL;
+    for (int i = 3; i < 2 + dimension; i++)
+      fL[i] = uL*left[i];
+    fR[0] = wnR;
+    fR[1] = uR*(ER + pR);
+    fR[2] = uR*wnR + pR;
+    for (int i = 3; i < 2 + dimension; i++)
+      fR[i] = uR*right[i];
+
+    if (Sstar >= 0.) {
+      // U*L 区域
+      double coef = rhoL*(SL - uL)/(SL - Sstar);
+      double UstarL[len];
+      UstarL[0] = coef;
+      UstarL[1] = coef*(EL/rhoL + (Sstar - uL)*(Sstar + pL/(rhoL*(SL - uL))));
+      UstarL[2] = coef*Sstar;
+      for (int i = 3; i < 2 + dimension; i++)
+        UstarL[i] = coef*left[i]/rhoL;  // 切向动量守恒
+
+      for (int i = 0; i < len; i++)
+        f[i] = fL[i] + SL*(UstarL[i] - left[i]);
+    }
+    else {
+      // U*R 区域
+      double coef = rhoR*(SR - uR)/(SR - Sstar);
+      double UstarR[len];
+      UstarR[0] = coef;
+      UstarR[1] = coef*(ER/rhoR + (Sstar - uR)*(Sstar + pR/(rhoR*(SR - uR))));
+      UstarR[2] = coef*Sstar;
+      for (int i = 3; i < 2 + dimension; i++)
+        UstarR[i] = coef*right[i]/rhoR;
+
+      for (int i = 0; i < len; i++)
+        f[i] = fR[i] + SR*(UstarR[i] - right[i]);
+    }
+  }
+
+  double a = max(fabs(SL), fabs(SR));
+  if (a > 0.) {
+    double dt = CFL*Delta/a;
+    if (dt < dtmax) dtmax = dt;
+  }
+
+  return dtmax;
+}
+
 /**
 ## Utilities */
 
@@ -198,7 +355,22 @@ double update_conservation (scalar * conserved, scalar * updates, double dtmax)
     }
     slopes = vectors_append (slopes, slope);
   }
-  gradients (conserved, slopes);
+  // gradients (conserved, slopes);
+  foreach() {
+    scalar s; vector g;
+    for (s,g in conserved, slopes) {
+      foreach_dimension() {
+        if (!fs.x[] && !fs.x[1])
+          g.x[] = 0.;
+        else if (!fs.x[])
+          g.x[] = s.gradient(s[], s[], s[1])/Delta;
+        else if (!fs.x[1])
+          g.x[] = s.gradient(s[-1], s[], s[])/Delta;
+        else
+          g.x[] = s.gradient(s[-1], s[], s[1])/Delta;
+      }
+    }
+  }
 
   vector * lflux = NULL;
   int len = list_len (conserved);
@@ -253,7 +425,8 @@ double update_conservation (scalar * conserved, scalar * updates, double dtmax)
     }
 
     double eff_delta = (fm.x[] > SEPS) ? Delta*cm[]/fm.x[] : Delta;
-    double local_dtmax = riemann (r, l, eff_delta, f, len, HUGE);
+    double local_dtmax = riemann_hllc (r, l, eff_delta, f, len, HUGE);
+    // double local_dtmax = riemann (r, l, eff_delta, f, len, HUGE);
     if (cs[] >= CS_FLOOR && cs[-1] >= CS_FLOOR)
       dtmax = min(dtmax, local_dtmax);
 

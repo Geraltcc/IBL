@@ -2,8 +2,8 @@ set terminal pngcairo size 1200,800 enhanced font 'Arial,14'
 set output 'data/Cf2_plot.png'
 
 set xlabel '{/Symbol x} (arc length from stagnation)'
-set ylabel '{/Symbol Cf} (surface fractions)'
-set title 'IBL Surface Fraction Coeff'
+set ylabel '{Cf}'
+set title 'IBL'
 set grid
 set key top left
 set xrange[0:1]
