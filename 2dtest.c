@@ -1,6 +1,7 @@
 #include "grid/quadtree.h"
 #include "embed.h"
 #include "distance.h"
+// #include "implicit-euler.h"
 #include "mycompressible_nofr.h"
 // #include "mycompressible_mirror.h"
 #include "view.h"
@@ -11,9 +12,15 @@
 #define maxlevel 10
 #define minlevel 6
 
+coord stag = {-0.5, 0.};
+coord tail = {0.5, 0.};
+
+#define box_width 0.1
+#define box_refine_level 11
+
 #define mach 0.6
 #define rho0 1.
-#define p0 (1./1.4)
+#define p0 1.
 
 #define u_inf (mach * sqrt(gammao * p0 / rho0))
 #define E_inf (p0/(gammao - 1.) + 0.5 * rho0 * sq(u_inf))
@@ -32,9 +39,9 @@ void update_ue() {
         coord n, b;
         embed_geometry(point, &b, &n);
 
-        double rho_s = my_embed_interpolate(point, rho, b);
-        double ux = my_embed_interpolate(point, w.x, b) / rho_s;
-        double uy = my_embed_interpolate(point, w.y, b) / rho_s;
+        double rho_s = embed_interpolate(point, rho, b);
+        double ux = embed_interpolate(point, w.x, b) / rho_s;
+        double uy = embed_interpolate(point, w.y, b) / rho_s;
         double un = ux * n.x + uy * n.y;
         double etx = ux - un * n.x;
         double ety = uy - un * n.y;
@@ -43,12 +50,26 @@ void update_ue() {
     boundary({ue});
 }
 
+void box_refine(coord center, double width, int refine_level) {
+    double step = width/2.;
+    refine (level < refine_level 
+      && fabs(x - center.x) < step
+      && fabs(y - center.y) < step
+    );
+}
+
+#define stag_refine() box_refine(stag, box_width, box_refine_level);
+#define tail_refine() box_refine(tail, box_width/2., box_refine_level);
+
 int main() {
     L0 = 5.0;
     size(L0);
 
     init_grid(1 << minlevel);
     origin(-L0/2., -L0/2.);
+
+    stag_refine();
+    tail_refine();
 
     CFL = 0.3;
 
@@ -75,14 +96,17 @@ w.t[embed] = neumann(0.);    // 滑移
 double stag_x = HUGE;
 
 event solid_init(i = 0) {
-    FILE* fp = fopen("NACA0012_blunt_new.gnu", "r");
-    // FILE* fp = fopen("NACA0012_processed.gnu", "r");
+    // FILE* fp = fopen("airfoil/NACA0012_blunt_new.gnu", "r");
+    FILE* fp = fopen("airfoil/NACA0012_processed.gnu", "r");
+    // FILE* fp = fopen("airfoil/RAE2822_processed.gnu", "r");
     p = input_xy(fp);
     distance(d, p);
     while(adapt_wavelet({d}, (double[]){1e-30}, maxlevel).nf);
 
     do {
         solid(cs, fs, (d[]+d[-1]+d[0,-1]+d[-1,-1])/4.);
+        stag_refine();
+        tail_refine();
     } while (adapt_wavelet({cs}, (double[]){1e-30}, maxlevel).nf);
 
     foreach(reduction(min:stag_x)) {
@@ -91,6 +115,9 @@ event solid_init(i = 0) {
                 stag_x = x;
         }
     }
+
+    stag_refine();
+    tail_refine();
 }
 
 event init(i = 0) {
@@ -111,6 +138,8 @@ event init(i = 0) {
 
 event adapt(i++) {
     adapt_wavelet({cs, rho, w}, (double[]){1e-30, 1e-2, 1e-2, 1e-2, 1e-2}, maxlevel, minlevel);
+    stag_refine();
+    tail_refine();
     fractions_cleanup(cs, fs);
     build_cutcell_cache();
 }
@@ -143,7 +172,7 @@ double scalar_min(scalar s) {
 
 scalar wn[];
 
-event logfile(i += 100) {
+event logfile(i += 10) {
     double dw = 0.;
     if (dt > 1e-10)
         dw = change (w.x, wn)/dt;
@@ -159,7 +188,7 @@ event logfile(i += 100) {
     fprintf(stderr, "[log] i: %04d t: %.4e dt: %.4e grid: %ld w_max: %.4e cs_min: %.4e dw: %.4e\n", i, t, dt, grid->n, w_max, cs_min, dw);
 }
 
-event output(t += 1.0) {
+event output(t+=1.) {
     update_ue();
     
     static int frame = 0;
@@ -172,20 +201,23 @@ event output(t += 1.0) {
 
     char filename[80];
 
-    sprintf(filename, "output/grid_%04d.png", frame);
+    sprintf(filename, "output/movie_%04d.png", frame++);
     view(width = 2000, height = 2000, samples=8);
     clear();
     squares("rho", map=viridis, min=rho_min, max=rho_max, linear=false);
+    cells();
     draw_vof("cs", "fs", lc={0., 0., 0.}, lw=1.0);
     colorbar(map=viridis, min=rho_min, max=rho_max, label="rho", pos={-0.95, 0.});
     save(filename);
-    frame++;
+}
 
+event output_ue(t += 0.1) {
+    update_ue();
     FILE* f_ue = fopen("data/ue.dat", "w");
     fprintf(f_ue, "# x ue\n");
     foreach_cache(cutcells) {
         if (y > 0.)
-            fprintf(f_ue, "%.6e %.6e\n", x - stag_x, ue[]/0.6);
+            fprintf(f_ue, "%.6e %.6e\n", (x - stag.x), ue[]/u_inf);
     }
     fflush(f_ue);
     fclose(f_ue);
@@ -327,7 +359,7 @@ event output(t += 1.0) {
 //     save("output/vector.png");
 // }
 
-event end(t = 10.0) {
+event end(t = 20.) {
     if (p) {
         free (p);
     }

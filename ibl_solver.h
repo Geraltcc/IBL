@@ -2,19 +2,15 @@
 
 #define front_tail_handling() \
     double dist_stag = sqrt(sq(x - stag_x) + sq(y - stag_y)); \
-    double dist_tail = fabs(x - tail_x); \
-    if (dist_stag < 3.0 * Delta || dist_tail < 0.01) { \
+    if (dist_stag < 3.0 * Delta) { \
         ibl_theta[] = 1e-6; \
-        ibl_H[] = 2.2216; \
-        ibl_Ctau[] = 0.003; \
+        ibl_H[] = 1.5; \
+        ibl_Ctau[] = 0.005; \
         continue; \
     } \
 
 #define MAX_LOCAL_ITER 20
 #define LOCAL_TOL 1e-10
-
-#define ibl_nu 1e-7
-#define ibl_H_temp 1.8
 
 scalar Re_th[];
 scalar Hk[];
@@ -38,6 +34,10 @@ void ibl_solver() {
 
         double theta_up = upwind_value(ibl_theta, e, point);
         double dxi = upwind_arc(e, point);
+
+        double slope_limit = 0.5 * ue_safe / dxi;
+        due_dxi = fmax(fmin(due_dxi, slope_limit), -slope_limit);
+
 
         // local Newton sigma*Q - S(Q) = b
         double theta = ibl_theta[];
@@ -72,7 +72,7 @@ void ibl_solver() {
 
     // ===================== H equation ===========================
 
-    double dtau = 1e-2;
+    double dtau = 1.;
     foreach_cache(cutcells) {
         front_tail_handling();
 
@@ -84,8 +84,12 @@ void ibl_solver() {
 
         double due_dxi = central_grad(ue, e, point);
         double ue_safe = fmax(ue[], 1e-8);
-        double H_up = upwind_value(ibl_H, e, point);
         double dxi = upwind_arc(e, point);
+
+        double slope_limit = 0.5 * ue_safe / dxi;
+        due_dxi = fmax(fmin(due_dxi, slope_limit), -slope_limit);
+
+        double H_up = upwind_value(ibl_H, e, point);
         double Re_th = fmax(rho[] * ue_safe*theta/ibl_nu, 10.);
 
         

@@ -73,8 +73,8 @@ extern vector * myvectors;
 Time integration will be done with a generic
 [predictor-corrector](predictor-corrector.h) scheme. */
 
-#include "predictor-corrector.h"
-// #include "local-timestepping.h"
+// #include "predictor-corrector.h"
+#include "local-timestepping.h"
 
 extern scalar rho, E;
 extern vector w;
@@ -90,9 +90,6 @@ static void advance_lts_compressible (scalar * output, scalar * input,
         o[] = 0.;
     continue;
     } 
-
-    if (cs[] < CS_FLOOR)
-      continue;
   
     double rho_v = rho[], w2 = 0.;
     foreach_dimension()
@@ -104,8 +101,9 @@ static void advance_lts_compressible (scalar * output, scalar * input,
       if (p_v < 0.) p_v = 1e-30;
       double a = sqrt(w2) / rho_v + sqrt(gammao * p_v / rho_v);
       if (a > 0.)
-        dt_local = CFL * Delta / a;
+        dt_local = CFL * cm[] * Delta / a;
     }
+    dt_local = fmin(dt_local, dt_global);
 
     scalar o, i, u;
     for (o,i,u in output, input, updates)
@@ -136,7 +134,7 @@ event defaults (i = 0)
 {
   evolving = list_concat (scalars, (scalar *) myvectors);
   update = update_conservation;
-  // lts_advance = advance_lts_compressible;
+  lts_advance = advance_lts_compressible;
 
   /**
   We switch to a pure minmod limiter by default for increased
@@ -184,6 +182,151 @@ The core of the central-upwind scheme (see e.g. section 3.1 of
 approximate solution of the Riemann problem given by the left and
 right states to get the fluxes `f`. */
 
+void mirror_state(const double * fluid, double * ghost, const double * n, int len) {
+  ghost[0] = fluid[0]; // rho
+  ghost[1] = fluid[1]; // E
+
+  double wdotn = 0.;
+  for (int d = 0; d < dimension; d++)
+      wdotn += fluid[2 + d] * n[d];
+  for (int d = 0; d < dimension; d++)
+      ghost[2 + d] = fluid[2 + d] - 2.*wdotn*n[d];
+}
+
+double riemann_Roe(const double * right, const double * left,
+  double Delta, double * f, int len,
+  double dtmax) {
+  double rhoL = left[0], rhoR = right[0];
+  double EL   = left[1], ER   = right[1];
+  double wnL  = left[2], wnR  = right[2];
+
+  if (rhoL < SEPS && rhoR < SEPS) {
+      for (int i = 0; i < len; i++) f[i] = 0.;
+      return dtmax;
+  }
+  if (rhoL < SEPS) {
+      rhoL = rhoR; EL = ER;
+      for (int i = 0; i < len; i++) ((double*)left)[i] = right[i];
+  }
+  if (rhoR < SEPS) {
+      rhoR = rhoL; ER = EL;
+      for (int i = 0; i < len; i++) ((double*)right)[i] = left[i];
+  }
+
+  // --- Primitive variables ---
+  double uL = wnL / rhoL, uR = wnR / rhoR;
+  double w2L = 0., w2R = 0.;
+  for (int i = 2; i < 2 + dimension; i++) {
+      w2L += sq(left[i] / rhoL);
+      w2R += sq(right[i] / rhoR);
+  }
+  double pL = (gammao - 1.)*(EL - 0.5*rhoL*w2L);
+  double pR = (gammao - 1.)*(ER - 0.5*rhoR*w2R);
+  pL = fmax(pL, SEPS);
+  pR = fmax(pR, SEPS);
+  double HL = (EL + pL)/rhoL;
+  double HR = (ER + pR)/rhoR;
+
+  // --- Left/Right physical fluxes ---
+  // F = (w_n, u_n(E+p), u_n*w_n + p, u_n*w_t)
+  double fL[len], fR[len];
+  fL[0] = wnL;
+  fL[1] = uL*(EL + pL);
+  fL[2] = uL*wnL + pL;
+  fR[0] = wnR;
+  fR[1] = uR*(ER + pR);
+  fR[2] = uR*wnR + pR;
+  for (int i = 3; i < 2 + dimension; i++) {
+      fL[i] = uL*left[i];
+      fR[i] = uR*right[i];
+  }
+
+  // --- Roe averages ---
+  double sqrL = sqrt(rhoL), sqrR = sqrt(rhoR);
+  double denom = sqrL + sqrR;
+  double u_roe = (sqrL*uL + sqrR*uR)/denom;
+  double H_roe = (sqrL*HL + sqrR*HR)/denom;
+  double q2_roe = sq(u_roe);
+
+  // tangential velocities
+  double vL = (dimension > 1) ? left[3]/rhoL  : 0.;
+  double vR = (dimension > 1) ? right[3]/rhoR : 0.;
+  double v_roe = (sqrL*vL + sqrR*vR)/denom;
+  q2_roe += sq(v_roe);
+
+  double c2_roe = (gammao - 1.)*(H_roe - 0.5*q2_roe);
+  if (c2_roe < SEPS) c2_roe = SEPS;
+  double c_roe = sqrt(c2_roe);
+
+  // --- Eigenvalues ---
+  double lam[4];
+  lam[0] = u_roe - c_roe;  // acoustic-
+  lam[1] = u_roe;           // entropy
+  lam[2] = u_roe;           // shear
+  lam[3] = u_roe + c_roe;  // acoustic+
+
+  // Harten entropy fix
+  double eps = 0.1*c_roe;
+  for (int k = 0; k < 4; k++) {
+      double la = fabs(lam[k]);
+      lam[k] = (la >= eps) ? la : (sq(lam[k]) + sq(eps))/(2.*eps);
+  }
+
+  // --- Wave strengths ---
+  double drho = rhoR - rhoL;
+  double du   = uR - uL;
+  double dv   = vR - vL;
+  double dp   = pR - pL;
+  double alpha1 = (dp - sqrt(rhoL*rhoR)*c_roe*du)/(2.*c2_roe);
+  double alpha2 = drho - dp/c2_roe;
+  double alpha3 = sqrt(rhoL*rhoR)*dv;
+  double alpha4 = (dp + sqrt(rhoL*rhoR)*c_roe*du)/(2.*c2_roe);
+
+  // --- Right eigenvectors (ordering: ρ, E, w_n, w_t) ---
+  //   r1 = (1,  H̃-ũc̃,  ũ-c̃,  ṽ)
+  //   r2 = (1,  ½q̃²,    ũ,     ṽ)
+  //   r3 = (0,  ṽ,       0,     1)
+  //   r4 = (1,  H̃+ũc̃,  ũ+c̃,  ṽ)
+
+  // --- Dissipation = Σ |λ_k| α_k r_k ---
+  double diss[len];
+  for (int i = 0; i < len; i++) diss[i] = 0.;
+  // Wave 1: acoustic-
+  diss[0] += lam[0]*alpha1 * 1.;
+  diss[1] += lam[0]*alpha1 * (H_roe - u_roe*c_roe);
+  diss[2] += lam[0]*alpha1 * (u_roe - c_roe);
+  if (dimension > 1)
+      diss[3] += lam[0]*alpha1 * v_roe;
+  // Wave 2: entropy
+  diss[0] += lam[1]*alpha2 * 1.;
+  diss[1] += lam[1]*alpha2 * 0.5*q2_roe;
+  diss[2] += lam[1]*alpha2 * u_roe;
+  if (dimension > 1)
+      diss[3] += lam[1]*alpha2 * v_roe;
+  // Wave 3: shear
+  if (dimension > 1) {
+      diss[1] += lam[2]*alpha3 * v_roe;
+      diss[3] += lam[2]*alpha3 * 1.;
+  }
+  // Wave 4: acoustic+
+  diss[0] += lam[3]*alpha4 * 1.;
+  diss[1] += lam[3]*alpha4 * (H_roe + u_roe*c_roe);
+  diss[2] += lam[3]*alpha4 * (u_roe + c_roe);
+  if (dimension > 1)
+      diss[3] += lam[3]*alpha4 * v_roe;
+  // --- Roe flux = ½(FL + FR) - ½·diss ---
+  for (int i = 0; i < len; i++)
+    f[i] = 0.5*(fL[i] + fR[i]) - 0.5*diss[i];
+
+    double a = fmax(fabs(lam[0]), fabs(lam[3]));
+    if (a > 0.) {
+        double dt = CFL * Delta / a;
+        if (dt < dtmax)
+            dtmax = dt;
+    }
+  return dtmax;         
+}
+
 static double riemann (const double * right, const double * left,
 		       double Delta, double * f, int len, 
 		       double dtmax)
@@ -208,125 +351,6 @@ static double riemann (const double * right, const double * left,
   return dtmax;
 }
 
-static double riemann_hllc (double * right, double * left,
-                             double Delta, double * f, int len,
-                             double dtmax)
-{
-  // 两侧都无效 → 零通量
-  double rhoL = left[0], rhoR = right[0];
-  if ((rhoL <= 0. || rhoL != rhoL) && (rhoR <= 0. || rhoR != rhoR)) {
-    for (int i = 0; i < len; i++)
-      f[i] = 0.;
-    return dtmax;
-  }
-
-  // 只有左侧无效 → 用右侧状态做零阶外推
-  if (rhoL <= 0. || rhoL != rhoL) {
-    for (int i = 0; i < len; i++)
-      left[i] = right[i];   // 注意：left 需要是非 const 的，或者用局部拷贝
-  }
-
-  // 只有右侧无效 → 用左侧状态做零阶外推
-  if (rhoR <= 0. || rhoR != rhoR) {
-    for (int i = 0; i < len; i++)
-      right[i] = left[i];
-  }
-
-  rhoL = left[0];
-  rhoR = right[0];
-
-  // 左状态
-  double EL = left[1], wnL = left[2];
-  double w2L = 0.;
-  for (int i = 2; i < 2 + dimension; i++) w2L += sq(left[i]);
-  double uL = wnL/rhoL;
-  double pL = (gammao - 1.)*(EL - 0.5*w2L/rhoL);
-  if (pL < 0.) pL = 0.;
-  double cL = sqrt(gammao*pL/rhoL);
-
-  // 右状态
-  double ER = right[1], wnR = right[2];
-  double w2R = 0.;
-  for (int i = 2; i < 2 + dimension; i++) w2R += sq(right[i]);
-  double uR = wnR/rhoR;
-  double pR = (gammao - 1.)*(ER - 0.5*w2R/rhoR);
-  if (pR < 0.) pR = 0.;
-  double cR = sqrt(gammao*pR/rhoR);
-
-  // 波速估计 (Einfeldt/Davis)
-  double SL = min(uL - cL, uR - cR);
-  double SR = max(uL + cL, uR + cR);
-
-  // 接触波速 S*
-  double Sstar = (pR - pL + rhoL*uL*(SL - uL) - rhoR*uR*(SR - uR))
-               / (rhoL*(SL - uL) - rhoR*(SR - uR));
-
-  if (SL >= 0.) {
-    // 全部取左通量
-    f[0] = wnL;
-    f[1] = uL*(EL + pL);
-    f[2] = uL*wnL + pL;
-    for (int i = 3; i < 2 + dimension; i++)
-      f[i] = uL*left[i];
-  }
-  else if (SR <= 0.) {
-    // 全部取右通量
-    f[0] = wnR;
-    f[1] = uR*(ER + pR);
-    f[2] = uR*wnR + pR;
-    for (int i = 3; i < 2 + dimension; i++)
-      f[i] = uR*right[i];
-  }
-  else {
-    // 中间状态
-    double fL[len], fR[len];
-    fL[0] = wnL;
-    fL[1] = uL*(EL + pL);
-    fL[2] = uL*wnL + pL;
-    for (int i = 3; i < 2 + dimension; i++)
-      fL[i] = uL*left[i];
-    fR[0] = wnR;
-    fR[1] = uR*(ER + pR);
-    fR[2] = uR*wnR + pR;
-    for (int i = 3; i < 2 + dimension; i++)
-      fR[i] = uR*right[i];
-
-    if (Sstar >= 0.) {
-      // U*L 区域
-      double coef = rhoL*(SL - uL)/(SL - Sstar);
-      double UstarL[len];
-      UstarL[0] = coef;
-      UstarL[1] = coef*(EL/rhoL + (Sstar - uL)*(Sstar + pL/(rhoL*(SL - uL))));
-      UstarL[2] = coef*Sstar;
-      for (int i = 3; i < 2 + dimension; i++)
-        UstarL[i] = coef*left[i]/rhoL;  // 切向动量守恒
-
-      for (int i = 0; i < len; i++)
-        f[i] = fL[i] + SL*(UstarL[i] - left[i]);
-    }
-    else {
-      // U*R 区域
-      double coef = rhoR*(SR - uR)/(SR - Sstar);
-      double UstarR[len];
-      UstarR[0] = coef;
-      UstarR[1] = coef*(ER/rhoR + (Sstar - uR)*(Sstar + pR/(rhoR*(SR - uR))));
-      UstarR[2] = coef*Sstar;
-      for (int i = 3; i < 2 + dimension; i++)
-        UstarR[i] = coef*right[i]/rhoR;
-
-      for (int i = 0; i < len; i++)
-        f[i] = fR[i] + SR*(UstarR[i] - right[i]);
-    }
-  }
-
-  double a = max(fabs(SL), fabs(SR));
-  if (a > 0.) {
-    double dt = CFL*Delta/a;
-    if (dt < dtmax) dtmax = dt;
-  }
-
-  return dtmax;
-}
 
 /**
 ## Utilities */
@@ -397,6 +421,18 @@ double update_conservation (scalar * conserved, scalar * updates, double dtmax)
     foreach_face()
       f.x[] = 0.;
 
+  vector n_embed = new vector;
+  foreach() {
+    foreach_dimension()
+      n_embed.x[] = 0.;
+    if (cs[] > 0. && cs[] < 1.) {
+      coord n, b;
+      embed_geometry(point, &b, &n);
+      foreach_dimension()
+        n_embed.x[] = n.x;
+    }
+  }
+
   foreach_face (reduction (min:dtmax)) {
 
     double r[len], l[len];
@@ -425,10 +461,42 @@ double update_conservation (scalar * conserved, scalar * updates, double dtmax)
     }
 
     double eff_delta = (fm.x[] > SEPS) ? Delta*cm[]/fm.x[] : Delta;
-    double local_dtmax = riemann_hllc (r, l, eff_delta, f, len, HUGE);
-    // double local_dtmax = riemann (r, l, eff_delta, f, len, HUGE);
-    if (cs[] >= CS_FLOOR && cs[-1] >= CS_FLOOR)
-      dtmax = min(dtmax, local_dtmax);
+
+    bool right_valid = (cs[] > 0.);
+    bool left_valid = (cs[-1] > 0.);
+
+    if (!right_valid && !left_valid) {
+      for (int k = 0; k < len; k++) f[k] = 0.;
+    }
+    else if (left_valid && !right_valid) {
+      double n_wall[dimension];
+      n_wall[0] = n_embed.x[];
+#if dimension > 1
+      n_wall[1] = n_embed.y[];
+#endif
+#if dimension > 2
+      n_wall[2] = n_embed.z[];
+#endif
+      mirror_state(l, r, n_wall, len);
+      riemann_Roe(r, l, eff_delta, f, len, dtmax);
+    }
+    else if (right_valid && !left_valid) {
+      double n_wall[dimension];
+      n_wall[0] = n_embed.x[-1];
+#if dimension > 1
+      n_wall[1] = n_embed.y[-1];
+#endif
+#if dimension > 2
+      n_wall[2] = n_embed.z[-1];
+#endif
+      mirror_state(r, l, n_wall, len);
+      riemann_Roe(r, l, eff_delta, f, len, dtmax);
+    }
+    else {
+      double local_dtmax = riemann_Roe(r, l, eff_delta, f, len, dtmax);
+      if (cs[] >= CS_FLOOR && cs[-1] >= CS_FLOOR)
+        dtmax = fmin(dtmax, local_dtmax);
+    }
 
     i = 0;
     for (vector fl in scalar_fluxes)
@@ -445,7 +513,7 @@ double update_conservation (scalar * conserved, scalar * updates, double dtmax)
   }
 
   foreach() {
-    if (cs[] < CS_FLOOR) {
+    if (cs[] <= 0.) {
       for (scalar ds in updates)
         ds[] = 0.;
       continue;
@@ -477,12 +545,23 @@ double update_conservation (scalar * conserved, scalar * updates, double dtmax)
       double wz_b  = my_embed_interpolate(point, w.z, b);
       w2_b += sq(wz_b);
     #endif
-      
-      double p_val = 0.;
+
+    double p_val = 0.;
       if (rho_b > SEPS) {
         p_val = (gammao - 1.) * (E_b - 0.5 * w2_b / rho_b);
         if (p_val < 0. || p_val != p_val) p_val = 0.;
+      } else {
+        p_val = 0.;
       }
+
+      // double c_f = sqrt(gammao * p_val / fmax(rho_b, SEPS));
+      // double un_f = (wx_b * n.x + wy_b * n.y) / fmax(rho_b, SEPS);
+      // // // 精确等熵 Riemann 不变量
+      // double c_wall = c_f + 0.5 * (gammao - 1.) * un_f;
+      // if (c_wall < SEPS) c_wall = c_f;
+      // double p_wall = p_val * pow(c_wall / c_f, 2. * gammao / (gammao - 1.));
+      // p_wall = fmax(p_wall, 0.);
+      double p_wall = p_val;
       
       idx = 0;
       for (scalar ds in updates) {
@@ -496,8 +575,7 @@ double update_conservation (scalar * conserved, scalar * updates, double dtmax)
                           (dim_idx == 2) ? n.z :
           #endif
                           0.;
-          double cm_safe = fmax(cs[], CS_FLOOR);
-          ds[] -= p_val * area * n_comp / (cm_safe * Delta);
+          ds[] -= p_wall * area * n_comp / (cm[] * Delta);
         }
         idx++;
       }
@@ -510,10 +588,8 @@ double update_conservation (scalar * conserved, scalar * updates, double dtmax)
   free (vector_slopes);
   free (scalar_fluxes);
   free (vector_fluxes);
-  delete ((scalar *) slopes);
-  free (slopes);
-  delete ((scalar *) lflux);
-  free (lflux);
-  
+  delete ((scalar *) slopes); free (slopes);
+  delete ((scalar *) lflux); free (lflux);
+  delete ((scalar *){n_embed});
   return dtmax;
 }

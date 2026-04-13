@@ -49,7 +49,7 @@ p[right] = dirichlet(0.);
 pf[right] = dirichlet(0.);
 
 u.n[embed] = dirichlet(0.);
-// u.t[embed] = neumann(0.);
+u.t[embed] = neumann(0.);
 
 
 event properties(i++) {
@@ -65,19 +65,19 @@ event adapt(i++) {
     adapt_wavelet({cs, u}, (double[]){1e-30, 1e-2, 1e-2}, maxlevel, minlevel);
 }
 
-event output(t += 1.0) {
-    char name[80];
-    static int count = 0;
-    sprintf(name, "output/grid_%04d.png", count++);
-    view(width = 2000, height = 2000);
-    clear();
-    squares("u.x", min=0., max=1.5, map=viridis, linear=false);
-    save(name);
+event output(i += 200) {
+    // char name[80];
+    // static int count = 0;
+    // sprintf(name, "output/grid_%04d.png", count++);
+    // view(width = 2000, height = 2000);
+    // clear();
+    // squares("u.x", min=0., max=1.5, map=viridis, linear=false);
+    // save(name);
 
     FILE* f_ue = fopen("data/ue.dat", "w");
     fprintf(f_ue, "# x y ue\n");
     foreach() {
-        if (cs[] > 0. && cs[] < 1.) {
+        if (cs[] > 0. && cs[] < 1. && y > 0.) {
             coord n, b;
             embed_geometry(point, &b, &n);
             fprintf(f_ue, "%.6e %.6e\n", x, embed_interpolate(point, u.x, b));

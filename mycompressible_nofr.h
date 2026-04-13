@@ -47,20 +47,20 @@ void flux (const double * s, double * f, double * e)
   e[1] = un + c;
 }
 
-event cell_linking(i++) {
-  for (scalar s in evolving) {
-    foreach() {
-      if (cs[] > 0. && cs[] < CS_FLOOR) {
-        double sum_val = 0., sum_w = 0.;
-        foreach_neighbor(1) {
-          if (cs[] >= CS_FLOOR) {
-            sum_val += cs[] * s[];
-            sum_w += cs[];
-          }
-        }
-        if (sum_w > 0.)
-          s[] = sum_val / sum_w;
-      }
-    }
-  }
-}
+// event cell_linking(i++) {
+//   for (scalar s in evolving) {
+//     foreach() {
+//       if (cs[] > 0. && cs[] < CS_FLOOR) {
+//         double sum_val = 0., sum_w = 0.;
+//         foreach_neighbor(1) {
+//           if (cs[] >= CS_FLOOR) {
+//             sum_val += cs[] * s[];
+//             sum_w += cs[];
+//           }
+//         }
+//         if (sum_w > 0.)
+//           s[] = sum_val / sum_w;
+//       }
+//     }
+//   }
+// }

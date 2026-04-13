@@ -9,4 +9,4 @@ set key top right
 set xrange[0:1]
 
 plot 'data/ue.dat' using 1:2 with points pt 7 ps 0.5 lc rgb 'blue' title 'present', \
-    'data/BL2.dat' every ::1 using 2:4 with points lw 2 lc rgb 'red' title 'xfoil'
+    'data/BL2.dat' every ::1 using 2:4 with lines lw 2 lc rgb 'red' title 'xfoil'

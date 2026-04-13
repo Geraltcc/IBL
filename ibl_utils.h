@@ -5,11 +5,12 @@ double cal_Hk(double Ma, double H) {
 
 double cal_Cf2(double Ma, double Re, double Hk) {
     double Fc = sqrt(1. + 0.2*sq(Ma));
-    return fmax(0.5 * 0.3 * exp(-1.33 * Hk) 
+    return 0.5 * fmax(0.3 * exp(-1.33 * Hk) 
         * pow(log10(fmax(Re/Fc, 2.0)), -1.74 - 0.31*Hk)
         + 0.00011 * (tanh(4. - Hk/0.875) - 1.), 0.);
 }
 
+/*
 double cal_H_star(double Re, double Hk) {
     double H0 = (Re > 400.) ? (3. + 400. / Re) : 4.;
     double H_star = 0.;
@@ -19,6 +20,23 @@ double cal_H_star(double Re, double Hk) {
         H_star = 1.505 + 4./Re + sq(Hk - H0) * (0.04/Hk + 0.007 * log(Re)/sq(Hk - H0 + 4./log(Re)));
     }
     return fmax(H_star, 0.);
+}
+*/
+
+double cal_H_star(double Re, double Hk) {
+    double H0 = (Re > 400.) ? (3. + 400. / Re) : 4.;
+    double Re_limit = fmax(Re, 200.);
+    double base = 1.505 + 4./Re_limit;
+    double term = 0.;
+    if (Hk < H0) {
+        term = (2. - 1.505 - 4./Re_limit) * sq((H0 - Hk) / (H0 - 1.)) * 1.5/(Hk + 0.5);
+    } else {
+        double dH = Hk - H0;
+        double log_Re = log10(Re);
+        if (log_Re < 0.1) log_Re = 0.1;
+        term = sq(dH) * (0.04/Hk + 0.007 * log_Re/sq(dH + 4./log_Re));
+    }
+    return base + term;
 }
 
 double cal_H_2star(double Ma, double Hk) {
